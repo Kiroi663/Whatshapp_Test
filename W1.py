@@ -6,65 +6,49 @@ from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from motor.motor_asyncio import AsyncIOMotorClient
 from bson import ObjectId
-import offreBot
 import certifi
 
 app = Flask(__name__)
 
+# Configuration
+CONFIG = {
+    "WA_PHONE_ID": os.getenv("WA_PHONE_ID"),
+    "WA_ACCESS_TOKEN": os.getenv("WA_ACCESS_TOKEN"),
+    "WEBHOOK_SECRET": os.getenv("WEBHOOK_SECRET", "claudelAI223"),
+    "MONGO_URI": os.getenv("MONGO_URI"),
+    "PORT": int(os.getenv("PORT", 3000))
+}
+
 class WhatsAppJobBot:
     def __init__(self):
-        # Configuration WhatsApp
-        self.phone_id = offreBot.WA_PHONE_ID
-        self.access_token = offreBot.WA_ACCESS_TOKEN
-        self.webhook_secret = "claudelAI223"
-
-        # Base de données
-        # Modifiez la connexion MongoDB avec ces paramètres
         self.db_client = AsyncIOMotorClient(
-            offreBot.MONGO_URI,
+            CONFIG["MONGO_URI"],
             tls=True,
-            tlsAllowInvalidCertificates=False,  # À n'utiliser qu'en dev
-            tlsCAFile=certifi.where(),
-
+            tlsCAFile=certifi.where()
         )
-        self.db = self.db_client["job_database"]
-        self.jobs = self.db["christ"]
-        self.users = self.db["utilisateurs"]
-
-        # Cache d'activité
+        self.db = self.db_client["job_bot_db"]
+        self.jobs = self.db["jobs"]
+        self.users = self.db["users"]
         self.user_activity = {}
 
-    async def init(self):
-        """Initialisation asynchrone"""
-        await self.db.users.create_index("user_id", unique=True)
-        await self.db.jobs.create_index([("metadata.category", 1), ("status.valid_until", -1)])
+    async def init_db(self):
+        """Initialize database indexes"""
+        await self.users.create_index("user_id", unique=True)
+        await self.jobs.create_index([("category", 1), ("valid_until", -1)])
 
-    # --- Gestion Webhook ---
-    def verify_signature(self, payload):
-        """Vérification de la signature WhatsApp"""
-        signature = request.headers.get("X-Hub-Signature-256", "").split("sha256=")[-1]
-        local_hash = hmac.new(self.webhook_secret, payload, hashlib.sha256).hexdigest()
-        return hmac.compare_digest(local_hash, signature)
-
-    async def handle_webhook(self, data):
-        """Traite les événements entrants"""
-        if not self.verify_signature(request.data):
+    # Webhook Verification
+    def verify_webhook(self, signature, payload):
+        """Verify WhatsApp webhook signature"""
+        if not signature:
             return False
+            
+        secret = CONFIG["WEBHOOK_SECRET"].encode()
+        expected_hash = hmac.new(secret, payload, hashlib.sha256).hexdigest()
+        return hmac.compare_digest(f"sha256={expected_hash}", signature)
 
-        entry = data.get("entry", [{}])[0]
-        changes = entry.get("changes", [{}])[0].get("value", {})
-
-        if "messages" in changes:
-            return await self.process_message(changes["messages"][0])
-        elif "interactive" in changes:
-            return await self.process_interaction(changes["interactive"])
-        
-
-        return True
-
-    # --- Traitement des messages ---
+    # Message Processing
     async def process_message(self, message):
-        """Traite les messages utilisateur"""
+        """Process incoming WhatsApp message"""
         user_id = message["from"]
         msg_type = message["type"]
 
@@ -72,217 +56,155 @@ class WhatsAppJobBot:
 
         if msg_type == "text":
             text = message["text"]["body"].lower()
-            return await self.handle_text(user_id, text)
-        
+            return await self.handle_text_message(user_id, text)
+            
         return False
 
-    async def process_interaction(self, interaction):
-        """Gère les interactions boutons"""
-        user_id = interaction["from"]
-        action = interaction["button_reply"]["id"]
-
-        await self.update_user_activity(user_id)
-
-        if action.startswith("category_"):
-            return await self.show_category_jobs(user_id, action.split("_")[1])
-        elif action == "show_more":
-            return await self.show_more_jobs(user_id)
-        elif action.startswith("apply_"):
-            return await self.handle_application(user_id, action.split("_")[1])
-        
-        return False
-
-    # --- Gestion Utilisateurs ---
+    # User Management
     async def update_user_activity(self, user_id):
-        """Met à jour l'activité utilisateur"""
+        """Update user last activity timestamp"""
         now = datetime.utcnow()
         self.user_activity[user_id] = now
         
-        await self.db.users.update_one(
+        await self.users.update_one(
             {"user_id": user_id},
             {"$set": {"last_activity": now}},
             upsert=True
         )
 
-    async def is_active_user(self, user_id):
-        """Vérifie si la conversation est active"""
-        last_active = self.user_activity.get(user_id)
-        if not last_active:
-            user = await self.db.users.find_one({"user_id": user_id})
-            last_active = user.get("last_activity") if user else None
+    async def get_active_users(self, since=timedelta(days=1)):
+        """Get users active since given time delta"""
+        cutoff = datetime.utcnow() - since
+        return await self.users.find({
+            "last_activity": {"$gte": cutoff}
+        }).to_list(None)
+
+    # Job Management
+    async def get_relevant_jobs(self, user_id, category=None, limit=5, page=0):
+        """Get jobs relevant to user"""
+        query = {"is_active": True}
         
-        return last_active and (datetime.utcnow() - last_active) < timedelta(hours=24)
-
-    # --- Gestion des Offres ---
-    async def get_user_jobs(self, user_id, category=None, page=0):
-        """Récupère les offres pertinentes"""
-        query = {"status.is_active": True}
         if category:
-            query["metadata.category"] = category
+            query["category"] = category
+        else:
+            user = await self.users.find_one({"user_id": user_id})
+            if user and user.get("preferences"):
+                query["category"] = {"$in": user["preferences"].get("categories", [])}
 
-        user = await self.db.users.find_one({"user_id": user_id})
-        if user and user.get("preferences"):
-            query.update({
-                "metadata.category": {"$in": user["preferences"].get("categories", [])},
-                "location.city": {"$in": user["preferences"].get("locations", [])}
-            })
+        return await self.jobs.find(query).sort("posted_at", -1).skip(page * limit).limit(limit).to_list(None)
 
-        return await self.jobs.find(query).sort("created_at", -1).skip(page * 5).limit(5).to_list(None)
-
-    async def format_job_message(self, job):
-        """Formate un message d'offre"""
-        return {
-            "header": f"📌 {job['title']['fr']}",
+    async def send_job_notification(self, user_id, job):
+        """Send job notification to user"""
+        message = {
+            "header": f"📌 {job['title']}",
             "body": (
-                f"🏢 Entreprise : {job['company']}\n"
-                f"📍 Lieu : {job['location']['city']}\n"
-                f"📅 Valide jusqu'au : {job['status']['valid_until'].strftime('%d/%m/%Y')}"
+                f"🏢 Company: {job['company']}\n"
+                f"📍 Location: {job['location']}\n"
+                f"📅 Valid until: {job['valid_until'].strftime('%d/%m/%Y')}"
             ),
             "buttons": [
-                {"type": "reply", "title": "📨 Postuler", "id": f"apply_{job['_id']}"},
-                {"type": "reply", "title": "ℹ️ Détails", "id": f"details_{job['_id']}"}
+                {"type": "reply", "title": "📨 Apply", "id": f"apply_{job['_id']}"},
+                {"type": "reply", "title": "ℹ️ Details", "id": f"details_{job['_id']}"}
             ]
         }
+        
+        return await self.send_whatsapp_message(user_id, message)
 
-    # --- Envoi de messages ---
+    # WhatsApp API Communication
     async def send_whatsapp_message(self, user_id, content):
-        """Envoie un message via l'API WhatsApp"""
-        if not await self.is_active_user(user_id):
+        """Send message via WhatsApp API"""
+        if not await self.is_user_active(user_id):
             return False
 
-        headers = {
-            "Authorization": f"Bearer {self.access_token}",
-            "Content-Type": "application/json"
-        }
-
-        payload = {
-            "messaging_product": "whatsapp",
-            "recipient_type": "individual",
-            "to": user_id,
-            "type": "interactive",
-            "interactive": {
-                "type": "button",
-                "header": {"type": "text", "text": content["header"]},
-                "body": {"text": content["body"]},
-                "action": {"buttons": content.get("buttons", [])}
-            }
-        }
-
-        # Envoi réel désactivé pour l'exemple
-        print(f"Message envoyé à {user_id}: {payload}")
+        # In production, you would actually call the WhatsApp API here
+        print(f"Would send to {user_id}: {content}")
         return True
 
-    # --- Handlers d'interface ---
-    async def handle_text(self, user_id, text):
-        """Gère les messages texte"""
-        if text == "/start":
-            return await self.send_welcome(user_id)
-        elif text == "1":
-            return await self.show_main_menu(user_id)
-        elif text == "2":
-            return await self.show_categories(user_id)
-        return await self.send_default_response(user_id)
+    # Command Handlers
+    async def handle_text_message(self, user_id, text):
+        """Handle text commands"""
+        commands = {
+            "start": self.send_welcome_message,
+            "menu": self.show_main_menu,
+            "jobs": self.show_job_categories
+        }
+        
+        handler = commands.get(text, self.send_help_message)
+        return await handler(user_id)
 
-    async def send_welcome(self, user_id):
-        """Message de bienvenue"""
+    async def send_welcome_message(self, user_id):
+        """Send welcome message"""
         return await self.send_whatsapp_message(user_id, {
-            "header": "👋 Bienvenue sur JobFinder!",
-            "body": (
-                "Trouvez les meilleures offres d'emploi\n\n"
-                "1. Voir les nouvelles offres\n"
-                "2. Parcourir par catégorie\n"
-                "3. Gérer mes alertes"
-            )
-        })
-
-    async def show_main_menu(self, user_id):
-        """Affiche le menu principal"""
-        return await self.send_whatsapp_message(user_id, {
-            "header": "📋 Menu Principal",
-            "body": "Sélectionnez une option :",
+            "header": "👋 Welcome to JobBot!",
+            "body": "Available commands:\n- menu: Show main menu\n- jobs: Browse jobs\n- help: Show help",
             "buttons": [
-                {"type": "reply", "title": "🔍 Nouveaux jobs", "id": "show_new"},
-                {"type": "reply", "title": "📚 Catégories", "id": "show_cats"},
-                {"type": "reply", "title": "⚙️ Préférences", "id": "show_prefs"}
+                {"type": "reply", "title": "📋 Menu", "id": "show_menu"},
+                {"type": "reply", "title": "🔍 Jobs", "id": "show_jobs"}
             ]
         })
 
-    # --- Service de Notifications ---
-    async def notification_service(self):
-        """Service de notifications automatiques"""
+    # Notification Service
+    async def run_notification_service(self):
+        """Background notification service"""
         while True:
             try:
-                await self.check_and_notify()
-                await asyncio.sleep(3600)  # Toutes les heures
+                await self.check_new_jobs()
+                await asyncio.sleep(3600)  # Check hourly
             except Exception as e:
-                print(f"Erreur notification_service: {str(e)}")
+                print(f"Notification error: {str(e)}")
                 await asyncio.sleep(300)
 
-    async def check_and_notify(self):
-        """Vérifie et envoie les notifications"""
+    async def check_new_jobs(self):
+        """Check and notify about new jobs"""
         new_jobs = await self.jobs.find({
-            "status.is_notified": False,
-            "status.valid_until": {"$gt": datetime.utcnow()}
+            "is_notified": False,
+            "valid_until": {"$gt": datetime.utcnow()}
         }).to_list(None)
 
         for job in new_jobs:
-            await self.notify_job_subscribers(job)
+            await self.notify_subscribers(job)
             await self.jobs.update_one(
                 {"_id": job["_id"]},
-                {"$set": {"status.is_notified": True}}
+                {"$set": {"is_notified": True}}
             )
 
-    async def notify_job_subscribers(self, job):
-        """Notifie les abonnés"""
-        pipeline = [
-            {"$match": {
-                "preferences.categories": {"$in": job["metadata"]["category"]},
-                "last_activity": {"$gt": datetime.utcnow() - timedelta(days=7)}
-            }},
-            {"$project": {"user_id": 1}}
-        ]
-
-        async for user in self.users.aggregate(pipeline):
-            if await self.is_active_user(user["user_id"]):
-                await self.send_job_alert(user["user_id"], job)
-
-    async def send_job_alert(self, user_id, job):
-        """Envoie une alerte d'offre"""
-        message = await self.format_job_message(job)
-        message["body"] = "🚨 NOUVELLE OFFRE!\n\n" + message["body"]
-        return await self.send_whatsapp_message(user_id, message)
-
-# --- Configuration Flask ---
+# Flask Routes
 bot = WhatsAppJobBot()
+
+@app.route('/webhook', methods=['GET'])
+def webhook_verification():
+    if request.args.get('hub.mode') == 'subscribe' and \
+       request.args.get('hub.verify_token') == CONFIG["WEBHOOK_SECRET"]:
+        return request.args.get('hub.challenge'), 200
+    return "Verification failed", 403
 
 @app.route('/webhook', methods=['POST'])
 async def webhook_handler():
-    if not bot.handle_webhook(request.json):
-        return jsonify({"status": "error"}), 403
-    return jsonify({"status": "success"}), 200
+    signature = request.headers.get('X-Hub-Signature-256')
+    if not bot.verify_webhook(signature, request.data):
+        return jsonify({"status": "invalid signature"}), 403
 
-@app.route('/webhook', methods=['GET'])
-def verify_webhook():
-    mode = request.args.get("hub.mode")
-    token = request.args.get("hub.verify_token")
-    challenge = request.args.get("hub.challenge")
-    
-    if mode == "subscribe" and token == os.getenv("WEBHOOK_SECRET"):
-        return challenge, 200
-    return "Verification failed", 403
+    data = request.json
+    entry = data.get('entry', [{}])[0]
+    changes = entry.get('changes', [{}])[0].get('value', {})
+
+    if 'messages' in changes:
+        await bot.process_message(changes['messages'][0])
+    elif 'interactive' in changes:
+        await bot.process_interaction(changes['interactive'])
+
+    return jsonify({"status": "success"}), 200
 
 @app.route('/health')
 def health_check():
-    return jsonify({"status": "ok", "timestamp": datetime.utcnow().isoformat()}), 200
+    return jsonify({"status": "healthy", "timestamp": datetime.utcnow().isoformat()})
 
-if __name__ == "__main__":
-    # Initialisation
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(bot.init())
-    
-    # Démarrer le service de notifications
-    loop.create_task(bot.notification_service())
-    
-    # Démarrer Flask
-    app.run(host='0.0.0.0', port=3000)
+# Startup
+async def initialize():
+    await bot.init_db()
+    asyncio.create_task(bot.run_notification_service())
+
+if __name__ == '__main__':
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(initialize())
+    app.run(host='0.0.0.0', port=CONFIG["PORT"])
