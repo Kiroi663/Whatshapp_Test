@@ -24,9 +24,9 @@ class WhatsAppJobBot:
             tls=True,
             tlsCAFile=certifi.where()
         )
-        self.db = self.db_client["job_bot_db"]
-        self.jobs = self.db["jobs"]
-        self.users = self.db["users"]
+        self.db = self.db_client["job_database"]
+        self.jobs = self.db["christ"]
+        self.users = self.db["utilisateurs"]
         self.user_activity = {}
 
     def init_db(self):
