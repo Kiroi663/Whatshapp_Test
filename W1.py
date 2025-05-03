@@ -12,10 +12,10 @@ app = Flask(__name__)
 
 # Configuration
 CONFIG = {
-    "WA_PHONE_ID": os.getenv("WA_PHONE_ID"),
-    "WA_ACCESS_TOKEN": os.getenv("WA_ACCESS_TOKEN"),
-    "WEBHOOK_SECRET": os.getenv("WEBHOOK_SECRET", "claudelAI223"),
-    "MONGO_URI": os.getenv("MONGO_URI"),
+    "WA_PHONE_ID": offreBot.WA_PHONE_ID,
+    "WA_ACCESS_TOKEN": offreBot.WA_ACCESS_TOKEN,
+    "WEBHOOK_SECRET": "claudelAI223",
+    "MONGO_URI": offreBot.MONGO_URI,
     "PORT": int(os.getenv("PORT", 3000))
 }
 
