@@ -7,6 +7,7 @@ from pymongo import MongoClient
 import certifi
 import logging
 from waitress import serve
+import offreBot
 
 # Configuration du logging
 logging.basicConfig(level=logging.INFO)
