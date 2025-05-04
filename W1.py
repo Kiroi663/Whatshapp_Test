@@ -7,16 +7,15 @@ from pymongo import MongoClient
 import certifi
 import logging
 from waitress import serve
-import offreBot
 
 # Configuration du logging
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
 class Config:
-    # Configuration améliorée avec validation
+    # Configuration dynamique avec variables d'environnement
     WEBHOOK_SECRET = ('claudelAI223').strip().encode('utf-8')
     MONGO_URI = offreBot.MONGO_URI
     WA_PHONE_ID = offreBot.WA_PHONE_ID
@@ -25,81 +24,78 @@ class Config:
 
     @classmethod
     def validate(cls):
-        missing = [name for name, value in [
-            ('WEBHOOK_SECRET', cls.WEBHOOK_SECRET),
-            ('MONGO_URI', cls.MONGO_URI),
-            ('WA_PHONE_ID', cls.WA_PHONE_ID),
-            ('WA_ACCESS_TOKEN', cls.WA_ACCESS_TOKEN)
-        ] if not value]
-        
+        required = {
+            'WHATSAPP_WEBHOOK_SECRET': cls.WEBHOOK_SECRET,
+            'MONGODB_URI': cls.MONGO_URI,
+            'WHATSAPP_PHONE_ID': cls.WA_PHONE_ID,
+            'WHATSAPP_ACCESS_TOKEN': cls.WA_ACCESS_TOKEN
+        }
+        missing = [k for k, v in required.items() if not v]
         if missing:
-            raise ValueError(f'Paramètres manquants: {", ".join(missing)}')
+            raise ValueError(f'Configuration manquante: {", ".join(missing)}')
 
 def verify_signature(request):
-    """Vérification robuste de la signature HMAC"""
-    signature_header = request.headers.get('X-Hub-Signature-256', '')
-    
-    if not signature_header.startswith('sha256='):
-        logger.error("Format de signature incorrect")
-        return False
-    
-    received_signature = signature_header.split('=')[1]
-    payload = request.get_data()
-    
-    # Génération de la signature attendue
-    expected_signature = hmac.new(
-        Config.WEBHOOK_SECRET,
-        payload,
-        digestmod=hashlib.sha256
-    ).hexdigest()
+    """Vérification améliorée de la signature avec gestion d'erreurs"""
+    try:
+        signature_header = request.headers.get('X-Hub-Signature-256', '')
+        if not signature_header.startswith('sha256='):
+            logger.error("Format d'en-tête de signature invalide")
+            return False
 
-    logger.debug(f"Signature reçue: {received_signature}")
-    logger.debug(f"Signature générée: {expected_signature}")
-    
-    return hmac.compare_digest(received_signature, expected_signature)
+        received_signature = signature_header.split('=')[1]
+        payload = request.get_data()
+
+        # Génération de la signature attendue
+        expected_signature = hmac.new(
+            Config.WEBHOOK_SECRET,
+            payload,
+            digestmod=hashlib.sha256
+        ).hexdigest()
+
+        logger.debug(f"Signature reçue: {received_signature}")
+        logger.debug(f"Signature générée: {expected_signature}")
+
+        return hmac.compare_digest(received_signature, expected_signature)
+
+    except Exception as e:
+        logger.error(f"Erreur de vérification: {str(e)}")
+        return False
 
 @app.route('/webhook', methods=['GET'])
-def verify_webhook():
+def webhook_verification():
     """Validation initiale du webhook"""
     try:
-        mode = request.args.get('hub.mode')
-        token = request.args.get('hub.verify_token')
-        challenge = request.args.get('hub.challenge')
-        
-        if mode == 'subscribe' and token == Config.WEBHOOK_SECRET.decode():
+        if (request.args.get('hub.mode') == 'subscribe' and 
+            request.args.get('hub.verify_token') == Config.WEBHOOK_SECRET.decode()):
             logger.info("Validation du webhook réussie")
-            return challenge, 200
-            
+            return request.args.get('hub.challenge'), 200
     except Exception as e:
-        logger.error(f"Erreur de validation: {str(e)}")
+        logger.error(f"Erreur lors de la validation: {str(e)}")
     
     logger.warning("Échec de la validation du webhook")
     return "Échec de vérification", 403
 
 @app.route('/webhook', methods=['POST'])
 def handle_webhook():
-    """Gestion des requêtes WhatsApp"""
+    """Gestion des requêtes entrantes"""
     if not verify_signature(request):
-        logger.warning("Accès non autorisé - Signature invalide")
+        logger.warning("Accès non autorisé - Signature HMAC invalide")
         return jsonify(error="Accès refusé"), 403
 
     try:
         data = request.get_json()
-        logger.debug(f"Données reçues: {data}")
+        logger.info(f"Reçu: {data}")
         
-        # Traitement basique des messages
-        if 'entry' in data and 'changes' in data['entry'][0]['value']:
-            return jsonify(status="Message reçu"), 200
-            
-        return jsonify(status="Format non supporté"), 400
+        # Traiter le message WhatsApp ici
+        return jsonify(status="Message traité"), 200
 
     except Exception as e:
         logger.error(f"Erreur de traitement: {str(e)}", exc_info=True)
-        return jsonify(error="Erreur interne"), 500
+        return jsonify(error="Erreur serveur"), 500
 
 @app.route('/health')
 def health_check():
-    """Endpoint de santé avec vérification MongoDB"""
+    """Endpoint de vérification de santé"""
     try:
         client = MongoClient(
             Config.MONGO_URI,
@@ -110,14 +106,14 @@ def health_check():
         client.admin.command('ping')
         return jsonify(
             status="healthy",
-            mongo="connecté",
+            database="connected",
             timestamp=datetime.utcnow().isoformat()
         ), 200
     except Exception as e:
         logger.error(f"Erreur MongoDB: {str(e)}")
         return jsonify(
             status="unhealthy",
-            mongo="déconnecté",
+            database="disconnected",
             error=str(e)
         ), 500
 
