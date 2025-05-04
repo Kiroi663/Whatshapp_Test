@@ -11,16 +11,16 @@ from waitress import serve
 import offreBot
 
 # Configuration du logging
-dlogging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
 class Config:
     # Token pour la validation initiale (GET)
-    VERIFY_TOKEN = ('claudelAI223').strip()
+    VERIFY_TOKEN = ('claudelAI223')
     # App Secret pour la signature HMAC (POST)
-    APP_SECRET = ('7c61b31a0530bc3cc28f632a9b3e32be').strip().encode('utf-8')
+    APP_SECRET = b'7c61b31a0530bc3cc28f632a9b3e32be'
 
     # Variables WhatsApp/Mongo
     MONGO_URI = offreBot.MONGO_URI
@@ -31,10 +31,6 @@ class Config:
     @classmethod
     def validate(cls):
         missing = []
-        if not cls.VERIFY_TOKEN:
-            missing.append('WHATSAPP_VERIFY_TOKEN')
-        if not cls.APP_SECRET:
-            missing.append('WHATSAPP_APP_SECRET')
         if not cls.MONGO_URI:
             missing.append('MONGODB_URI')
         if not cls.WA_PHONE_ID:
@@ -42,21 +38,24 @@ class Config:
         if not cls.WA_ACCESS_TOKEN:
             missing.append('WHATSAPP_ACCESS_TOKEN')
         if missing:
-            raise ValueError(f'Missing configuration: {', '.join(missing)}')
+            raise ValueError(f"Missing configuration: {', '.join(missing)}")
 
 
 def verify_signature(payload: bytes, signature_header: str) -> bool:
     """Vérifie la signature HMAC envoyée dans les en-têtes POST"""
+    logger.debug(f"Verifying signature header: {signature_header}")
     if not signature_header:
-        logger.error('No signature header')
+        logger.error('No signature header provided')
         return False
 
     # Détecter SHA256 ou SHA1
     if signature_header.startswith('sha256='):
         algo = hashlib.sha256
+        logger.debug('Using SHA256 for HMAC verification')
         received_sig = signature_header.split('=', 1)[1]
     elif signature_header.startswith('sha1='):
         algo = hashlib.sha1
+        logger.debug('Using SHA1 for HMAC verification')
         received_sig = signature_header.split('=', 1)[1]
     else:
         logger.error('Invalid signature header format')
@@ -75,12 +74,13 @@ def webhook_verify():
     mode = request.args.get('hub.mode')
     token = request.args.get('hub.verify_token')
     challenge = request.args.get('hub.challenge')
+    logger.debug(f"Webhook verification attempt - mode: {mode}, received token: {token}")
 
     if mode == 'subscribe' and token == Config.VERIFY_TOKEN:
         logger.info('Webhook verified successfully')
         return challenge, 200
 
-    logger.warning('Webhook verification failed')
+    logger.warning(f'Webhook verification failed - expected token: {Config.VERIFY_TOKEN}')
     return 'Verification failed', 403
 
 @app.route('/webhook', methods=['POST'])
@@ -88,7 +88,10 @@ def handle_webhook():
     """Gestion des requêtes entrantes"""
     # Lire le payload brut en premier
     payload = request.get_data()
+    logger.debug(f"Raw payload bytes: {payload}")
+    # Récupérer la signature (SHA-256 ou SHA-1)
     signature = request.headers.get('X-Hub-Signature-256') or request.headers.get('X-Hub-Signature')
+    logger.debug(f"Header signature: {signature}")
 
     if not verify_signature(payload, signature):
         logger.warning('Unauthorized access - invalid HMAC signature')
@@ -96,7 +99,7 @@ def handle_webhook():
 
     try:
         data = json.loads(payload)
-        logger.info(f'Received payload: {json.dumps(data)}')
+        logger.info(f'Received payload JSON: {json.dumps(data)}')
 
         # TODO: traiter le message WhatsApp
         return jsonify(status='Message processed'), 200
