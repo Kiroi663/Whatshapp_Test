@@ -4,7 +4,7 @@ import hashlib
 import json
 import logging
 import random
-import asyncio
+import time
 import threading
 from datetime import datetime
 from flask import Flask, request, jsonify
@@ -89,12 +89,17 @@ def create_interactive_message(text, buttons=None, sections=None):
         interactive["action"] = {"buttons": []}
         for btn in buttons:
             if 'url' in btn:
+                # Correction du format CTA URL
                 interactive["action"]["buttons"].append({
                     "type": "cta_url",
                     "title": btn['title'],
-                    "cta_url": btn['url']
+                    "cta_url": {
+                        "display_text": btn.get('display', btn['title']),
+                        "url": btn['url']
+                    }
                 })
             else:
+                # Correction du format reply button
                 interactive["action"]["buttons"].append({
                     "type": "reply",
                     "reply": {
@@ -175,7 +180,8 @@ def show_main_menu(user: str):
         "Pour voir comment utiliser notre service :",
         buttons=[{
             'title': '🎥 Regarder la démo vidéo', 
-            'url': Config.TELEGRAM_DEMO_URL
+            'url': Config.TELEGRAM_DEMO_URL,
+            'display': 'Voir la démo'
         }]
     )
     
@@ -223,23 +229,23 @@ def send_jobs_page(user: str, jobs: list, category: str, page: int = 0):
     
     # Send each job with URL button
     for job in jobs[start_idx:end_idx]:
-        template = random.choice(JOB_TEMPLATES)
-        job_url = job.get('url', 'https://emploicd.com/offre')
+        # Set default values if missing
+        job.setdefault('url', 'https://emploicd.com/offre')
+        job.setdefault('title', 'Sans titre')
+        job.setdefault('company', 'Entreprise non spécifiée')
+        job.setdefault('location', 'Localisation non spécifiée')
+        job.setdefault('description', 'Aucune description disponible')
         
-        job_msg = template.format(
-            title=job.get('title', 'Sans titre'),
-            company=job.get('company', 'Entreprise non spécifiée'),
-            location=job.get('location', 'Localisation non spécifiée'),
-            description=job.get('description', 'Aucune description disponible'),
-            url=job_url
-        )
+        template = random.choice(JOB_TEMPLATES)
+        job_msg = template.format(**job)
         
         send_whatsapp(
             user,
             job_msg,
             buttons=[{
                 'title': '📌 Voir offre complète',
-                'url': job_url
+                'url': job['url'],
+                'display': 'Voir détails'
             }]
         )
     
@@ -386,48 +392,55 @@ def webhook_receive():
 
 # ---------- Notification System ----------
 def notify_new_jobs():
+    import time
     while True:
         try:
             # Find jobs not yet notified
             new_jobs = list(jobs_col.find({"is_notified": {"$ne": True}}))
             
             for job in new_jobs:
-                # Find users who favorited this category
+                # Skip if missing required fields
+                if 'category' not in job:
+                    logger.warning(f"Job {job.get('_id')} skipped - missing category")
+                    continue
+                    
+                # Set default values
+                job.setdefault('url', 'https://emploicd.com/offre')
+                job.setdefault('title', 'Nouvelle offre')
+                job.setdefault('description', '')
+                
+                # Find subscribers
                 users = favs_col.find({"categories": job['category']})
                 
                 for user in users:
-                    # Prepare notification message
                     template = random.choice(JOB_TEMPLATES)
-                    notification = template.format(
-                        title=job.get('title', 'Nouvelle offre'),
-                        company=job.get('company', ''),
-                        location=job.get('location', ''),
-                        description=job.get('description', ''),
-                        url=job.get('url', 'https://emploicd.com/offre')
-                    )
+                    notification = template.format(**job)
                     
-                    # Send with URL button
                     send_whatsapp(
                         user['user_id'],
                         "🚨 NOUVELLE OFFRE DANS VOS FAVORIS 🚨\n\n" + notification,
                         buttons=[{
-                            'title': '📌 Voir offre complète',
-                            'url': job.get('url', 'https://emploicd.com/offre')
+                            'title': '📌 Voir offre',
+                            'url': job['url'],
+                            'display': 'Voir détails'
                         }]
                     )
+                    time.sleep(1)  # Rate limiting
                 
                 # Mark as notified
                 jobs_col.update_one(
                     {"_id": job['_id']},
-                    {"$set": {"is_notified": True, "notified_at": datetime.utcnow()}}
+                    {"$set": {
+                        "is_notified": True,
+                        "notified_at": datetime.utcnow()
+                    }}
                 )
             
-            # Wait before next check
-            asyncio.sleep(60)
-        
+            time.sleep(60)  # Check every minute
+            
         except Exception as e:
-            logger.error(f"Error in notification loop: {str(e)}")
-            asyncio.sleep(300)  # Wait longer if error occurs
+            logger.error(f"Notification error: {str(e)}")
+            time.sleep(300)  # Wait 5 minutes on error
 
 # ---------- Health Check ----------
 @app.route('/health', methods=['GET'])
