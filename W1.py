@@ -44,7 +44,7 @@ class Config:
 # ---------- Database ----------
 mongo = MongoClient(Config.MONGO_URI, tls=True, tlsCAFile=certifi.where())
 db = mongo['job_database']
-jobs_col = db['jobs']
+jobs_col = db['christ']
 favs_col = db['user_favorites']
 
 # ---------- Application State ----------
