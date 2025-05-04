@@ -10,16 +10,14 @@ import offreBot
 app = Flask(__name__)
 
 class Config:
-    # Variables essentielles pour l'API WhatsApp
-    WA_PHONE_ID = offreBot.WA_PHONE_ID  # ID du numéro de téléphone WhatsApp Business
-    WA_ACCESS_TOKEN = offreBot.WA_ACCESS_TOKEN  # Token d'accès à l'API
-    WEBHOOK_SECRET = ("claudelAI223").encode('utf-8')
+    WA_PHONE_ID = offreBot.WA_PHONE_ID
+    WA_ACCESS_TOKEN = offreBot.WA_ACCESS_TOKEN
+    WEBHOOK_SECRET = "claudelAI223".encode('utf-8')
     MONGO_URI = offreBot.MONGO_URI
     PORT = int(os.getenv("PORT", 10000))
 
     @classmethod
     def validate(cls):
-        """Validation des paramètres critiques"""
         required = {
             "WA_PHONE_ID": cls.WA_PHONE_ID,
             "WA_ACCESS_TOKEN": cls.WA_ACCESS_TOKEN,
@@ -28,6 +26,22 @@ class Config:
         for name, value in required.items():
             if not value:
                 raise ValueError(f"Configuration manquante: {name}")
+
+def verify_signature(request):
+    """Vérifie la signature du webhook WhatsApp"""
+    signature_header = request.headers.get('X-Hub-Signature-256', '')
+    if not signature_header.startswith('sha256='):
+        app.logger.error("Format de signature invalide")
+        return False
+        
+    received_signature = signature_header.split('=')[1]
+    generated_signature = hmac.new(
+        Config.WEBHOOK_SECRET,
+        request.get_data(),
+        digestmod=hashlib.sha256
+    ).hexdigest()
+
+    return hmac.compare_digest(received_signature, generated_signature)
 
 class WhatsAppClient:
     def __init__(self):
@@ -38,8 +52,6 @@ class WhatsAppClient:
         }
 
     def send_message(self, payload):
-        """Envoi de messages via l'API WhatsApp"""
-        # Implémentation réelle utiliserait requests.post()
         app.logger.info(f"Envoi WhatsApp à {payload.get('to')}")
         return True
 
@@ -60,8 +72,6 @@ def handle_webhook():
         if 'messages' in entry:
             message = entry['messages'][0]
             response = process_message(message)
-            
-            # Envoi effectif via WhatsApp
             whatsapp.send_message(response)
             
             return jsonify(status="message envoyé"), 200
@@ -71,7 +81,6 @@ def handle_webhook():
         return jsonify(error="Erreur serveur"), 500
 
 def process_message(message):
-    """Crée le payload pour l'API WhatsApp"""
     return {
         "messaging_product": "whatsapp",
         "to": message['from'],
