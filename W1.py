@@ -12,7 +12,6 @@ from pymongo import MongoClient
 import certifi
 from waitress import serve
 import requests
-import offreBot
 
 # ---------- Logging ----------
 logging.basicConfig(level=logging.INFO)
@@ -23,9 +22,9 @@ class Config:
     # WhatsApp webhook
     VERIFY_TOKEN = 'claudelAI223'
     APP_SECRET = b'7c61b31a0530bc3cc28f632a9b3e32be'
-    MONGO_URI = offreBot.MONGO_URI
-    WA_PHONE_ID = offreBot.WA_PHONE_ID
-    WA_ACCESS_TOKEN = offreBot.WA_ACCESS_TOKEN
+    MONGO_URI = os.getenv('MONGO_URI', 'mongodb+srv://user:pass@cluster.mongodb.net/db')
+    WA_PHONE_ID = os.getenv('WA_PHONE_ID', '1234567890')
+    WA_ACCESS_TOKEN = os.getenv('WA_ACCESS_TOKEN', 'your_whatsapp_token')
     PORT = int(os.getenv('PORT', 10000))
     BASE_URL = f"https://graph.facebook.com/v15.0/{WA_PHONE_ID}/messages"
     TELEGRAM_DEMO_URL = "https://t.me/yourchannel/video123"
@@ -41,10 +40,27 @@ class Config:
         if missing:
             raise ValueError(f"Missing configuration: {', '.join(missing)}")
 
+# ---------- Signature Verification ----------
+def verify_signature(payload: bytes, header: str) -> bool:
+    """Valide la signature HMAC-SHA256 des webhooks WhatsApp"""
+    if not header or not header.startswith('sha256='):
+        return False
+    
+    secret = Config.APP_SECRET
+    received_sig = header.split('sha256=', 1)[1].strip()
+    
+    expected_sig = hmac.new(
+        secret,
+        msg=payload,
+        digestmod=hashlib.sha256
+    ).hexdigest()
+    
+    return hmac.compare_digest(received_sig, expected_sig)
+
 # ---------- Database ----------
 mongo = MongoClient(Config.MONGO_URI, tls=True, tlsCAFile=certifi.where())
 db = mongo['job_database']
-jobs_col = db['christ']
+jobs_col = db['jobs']
 favs_col = db['user_favorites']
 
 # ---------- Application State ----------
@@ -74,7 +90,7 @@ CATEGORIES = {
     "Autre": []
 }
 
-# ---------- Enhanced WhatsApp Helpers ----------
+# ---------- WhatsApp Helpers ----------
 def create_interactive_message(text, buttons=None, sections=None):
     payload = {
         "messaging_product": "whatsapp",
@@ -89,7 +105,6 @@ def create_interactive_message(text, buttons=None, sections=None):
         interactive["action"] = {"buttons": []}
         for btn in buttons:
             if 'url' in btn:
-                # Correction du format CTA URL
                 interactive["action"]["buttons"].append({
                     "type": "cta_url",
                     "title": btn['title'],
@@ -99,7 +114,6 @@ def create_interactive_message(text, buttons=None, sections=None):
                     }
                 })
             else:
-                # Correction du format reply button
                 interactive["action"]["buttons"].append({
                     "type": "reply",
                     "reply": {
@@ -142,7 +156,7 @@ def send_whatsapp(to: str, text: str, buttons=None, sections=None):
         logger.error(f"Error sending message: {str(e)}")
         return False
 
-# ---------- Enhanced Business Logic ----------
+# ---------- Business Logic ----------
 def start_conversation(user: str):
     welcome_msg = (
         "🌟 *Bienvenue sur JobFinder* 🌟\n\n"
@@ -168,51 +182,32 @@ def show_main_menu(user: str):
         ]
     }]
     
-    send_whatsapp(
-        user,
-        "Choisissez une option dans le menu :",
-        sections=sections
-    )
-    
-    # Send Telegram demo button separately
-    send_whatsapp(
-        user,
-        "Pour voir comment utiliser notre service :",
-        buttons=[{
-            'title': '🎥 Regarder la démo vidéo', 
-            'url': Config.TELEGRAM_DEMO_URL,
-            'display': 'Voir la démo'
-        }]
-    )
+    send_whatsapp(user, "Choisissez une option :", sections=sections)
+    send_whatsapp(user, "Regardez notre tutoriel :", 
+        buttons=[{'title': '🎥 Voir la démo', 'url': Config.TELEGRAM_DEMO_URL}])
     
     user_states[user]["state"] = "AWAIT_MENU"
 
 def show_categories(user: str):
-    category_rows = []
-    for i, category in enumerate(CATEGORIES.keys(), start=1):
-        category_rows.append({
-            "id": str(i),
-            "title": f"{category} ({len(list(jobs_col.find({'category': category})))} offres)"
-        })
+    category_rows = [{"id": str(i+1), "title": f"{cat} ({jobs_col.count_documents({'category': cat})}"} 
+                   for i, cat in enumerate(CATEGORIES)]
     
-    sections = [{
-        "title": "Catégories disponibles",
-        "rows": category_rows
-    }]
-    
-    send_whatsapp(
-        user,
-        "Choisissez une catégorie :",
-        sections=sections
-    )
+    send_whatsapp(user, "Catégories disponibles :", 
+                 sections=[{"title": "Catégories", "rows": category_rows}])
     user_states[user]["state"] = "AWAIT_CATEGORY"
 
 def send_jobs_page(user: str, jobs: list, category: str, page: int = 0):
-    per_page = 5
-    total_pages = (len(jobs) // per_page) + (1 if len(jobs) % per_page != 0 else 0)
-    start_idx = page * per_page
-    end_idx = start_idx + per_page
+    PER_PAGE = 5
+    total_pages = (len(jobs) + PER_PAGE - 1) // PER_PAGE
     
+    # Set default values for missing fields
+    for job in jobs:
+        job.setdefault('url', 'https://emploicd.com/offre')
+        job.setdefault('title', 'Sans titre')
+        job.setdefault('company', 'Entreprise non spécifiée')
+        job.setdefault('location', 'Localisation non spécifiée')
+        job.setdefault('description', 'Aucune description disponible')
+
     # Update user state
     user_states[user].update({
         "jobs": jobs,
@@ -220,63 +215,24 @@ def send_jobs_page(user: str, jobs: list, category: str, page: int = 0):
         "category": category,
         "total_pages": total_pages
     })
-    
-    # Send page info
-    send_whatsapp(
-        user,
-        f"📄 Page *{page + 1}/{total_pages}* | Catégorie : *{category}*"
-    )
-    
-    # Send each job with URL button
-    for job in jobs[start_idx:end_idx]:
-        # Set default values if missing
-        job.setdefault('url', 'https://emploicd.com/offre')
-        job.setdefault('title', 'Sans titre')
-        job.setdefault('company', 'Entreprise non spécifiée')
-        job.setdefault('location', 'Localisation non spécifiée')
-        job.setdefault('description', 'Aucune description disponible')
-        
+
+    # Send jobs
+    start = page * PER_PAGE
+    for job in jobs[start:start+PER_PAGE]:
         template = random.choice(JOB_TEMPLATES)
-        job_msg = template.format(**job)
-        
-        send_whatsapp(
-            user,
-            job_msg,
-            buttons=[{
-                'title': '📌 Voir offre complète',
-                'url': job['url'],
-                'display': 'Voir détails'
-            }]
-        )
-    
+        send_whatsapp(user, template.format(**job), 
+                     buttons=[{'title': '📌 Voir offre', 'url': job['url']}])
+
     # Navigation buttons
     nav_buttons = []
     if page > 0:
         nav_buttons.append({'title': '⏮ Précédent', 'id': 'P'})
-    if page + 1 < total_pages:
+    if page < total_pages - 1:
         nav_buttons.append({'title': '⏭ Suivant', 'id': 'N'})
-    nav_buttons.append({'title': '🏠 Menu Principal', 'id': 'M'})
+    nav_buttons.append({'title': '🏠 Menu', 'id': 'M'})
     
-    send_whatsapp(
-        user,
-        "Que souhaitez-vous faire ensuite ?",
-        buttons=nav_buttons
-    )
-    
+    send_whatsapp(user, f"Page {page+1}/{total_pages}", buttons=nav_buttons)
     user_states[user]["state"] = "AWAIT_NAV"
-
-def handle_favorites(user: str):
-    favs = favs_col.find_one({"user_id": user}) or {"categories": []}
-    if not favs["categories"]:
-        send_whatsapp(user, "Vous n'avez aucune catégorie en favoris.")
-        return
-    
-    favorite_jobs = list(jobs_col.find({"category": {"$in": favs["categories"]}}))
-    
-    if not favorite_jobs:
-        send_whatsapp(user, "Aucune offre disponible dans vos catégories favorites.")
-    else:
-        send_jobs_page(user, favorite_jobs, "Vos Favoris")
 
 # ---------- Webhook Handler ----------
 app = Flask(__name__)
@@ -288,197 +244,79 @@ def webhook_verify():
     challenge = request.args.get('hub.challenge')
     
     if mode == 'subscribe' and token == Config.VERIFY_TOKEN:
-        logger.info("Webhook verified successfully")
+        logger.info("Webhook verified")
         return challenge, 200
     return 'Verification failed', 403
 
 @app.route('/webhook', methods=['POST'])
 def webhook_receive():
     try:
-        # Verify signature
         raw = request.get_data()
-        sig = request.headers.get('X-Hub-Signature-256')
-        if not verify_signature(raw, sig):
+        if not verify_signature(raw, request.headers.get('X-Hub-Signature-256')):
             return jsonify({"status": "invalid signature"}), 403
-        
+
         data = request.get_json()
-        
         for entry in data.get('entry', []):
             for change in entry.get('changes', []):
-                value = change['value']
-                
-                # Process each message
-                for message in value.get('messages', []):
-                    user = message['from']
-                    text = ''
-                    
-                    # Handle interactive messages (buttons/lists)
-                    if 'interactive' in message:
-                        interactive = message['interactive']
-                        if interactive['type'] == 'button_reply':
-                            text = interactive['button_reply']['id']
-                        elif interactive['type'] == 'list_reply':
-                            text = interactive['list_reply']['id']
-                    # Handle text messages
-                    elif 'text' in message:
-                        text = message['text']['body'].strip().upper()
-                    
-                    # Initialize new user
-                    if user not in user_states or text in ['START', 'MENU']:
-                        start_conversation(user)
-                        continue
-                    
-                    state = user_states[user].get('state', 'MAIN_MENU')
-                    
-                    # State machine
-                    if state == 'MAIN_MENU':
-                        if text == 'MENU':
-                            show_main_menu(user)
-                    
-                    elif state == 'AWAIT_MENU':
-                        if text == '1':
-                            show_categories(user)
-                        elif text == '2':
-                            jobs = list(jobs_col.find({}))
-                            send_jobs_page(user, jobs, "Toutes les offres")
-                        elif text == '3':
-                            handle_favorites(user)
-                        elif text == '4':
-                            send_whatsapp(user, "Fonctionnalité de recherche avancée à venir!")
-                        else:
-                            send_whatsapp(user, "Option invalide. Veuillez choisir dans le menu.")
-                    
-                    elif state == 'AWAIT_CATEGORY':
-                        if text.isdigit():
-                            categories = list(CATEGORIES.keys())
-                            if 1 <= int(text) <= len(categories):
-                                selected_category = categories[int(text)-1]
-                                jobs = list(jobs_col.find({"category": selected_category}))
-                                send_jobs_page(user, jobs, selected_category)
-                            else:
-                                send_whatsapp(user, "Numéro de catégorie invalide.")
-                        else:
-                            send_whatsapp(user, "Veuillez sélectionner une catégorie valide.")
-                    
-                    elif state == 'AWAIT_NAV':
-                        if text == 'P':
-                            current_page = user_states[user]['page']
-                            if current_page > 0:
-                                send_jobs_page(
-                                    user,
-                                    user_states[user]['jobs'],
-                                    user_states[user]['category'],
-                                    current_page - 1
-                                )
-                        elif text == 'N':
-                            current_page = user_states[user]['page']
-                            if current_page + 1 < user_states[user]['total_pages']:
-                                send_jobs_page(
-                                    user,
-                                    user_states[user]['jobs'],
-                                    user_states[user]['category'],
-                                    current_page + 1
-                                )
-                        elif text == 'M':
-                            show_main_menu(user)
-                        else:
-                            send_whatsapp(user, "Commande de navigation invalide.")
+                for msg in change['value'].get('messages', []):
+                    handle_message(msg)
         
         return jsonify({"status": "success"}), 200
-    
     except Exception as e:
-        logger.error(f"Error processing webhook: {str(e)}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+        logger.error(f"Webhook error: {str(e)}")
+        return jsonify({"status": "error"}), 500
+
+def handle_message(msg: dict):
+    user = msg['from']
+    text = extract_message_content(msg)
+    
+    if text in ['START', 'MENU'] or user not in user_states:
+        return start_conversation(user)
+        
+    state = user_states[user].get('state', 'MAIN_MENU')
+    
+    if state == 'MAIN_MENU' and text == 'MENU':
+        show_main_menu(user)
+    elif state == 'AWAIT_MENU':
+        handle_menu_selection(user, text)
+    elif state == 'AWAIT_CATEGORY':
+        handle_category_selection(user, text)
+    elif state == 'AWAIT_NAV':
+        handle_navigation(user, text)
 
 # ---------- Notification System ----------
 def notify_new_jobs():
     import time
     while True:
         try:
-            # Find jobs not yet notified
             new_jobs = list(jobs_col.find({"is_notified": {"$ne": True}}))
-            
             for job in new_jobs:
-                # Skip if missing required fields
                 if 'category' not in job:
-                    logger.warning(f"Job {job.get('_id')} skipped - missing category")
                     continue
                     
-                # Set default values
                 job.setdefault('url', 'https://emploicd.com/offre')
                 job.setdefault('title', 'Nouvelle offre')
                 job.setdefault('description', '')
                 
-                # Find subscribers
                 users = favs_col.find({"categories": job['category']})
-                
                 for user in users:
-                    template = random.choice(JOB_TEMPLATES)
-                    notification = template.format(**job)
-                    
                     send_whatsapp(
                         user['user_id'],
-                        "🚨 NOUVELLE OFFRE DANS VOS FAVORIS 🚨\n\n" + notification,
-                        buttons=[{
-                            'title': '📌 Voir offre',
-                            'url': job['url'],
-                            'display': 'Voir détails'
-                        }]
+                        "🚨 NOUVELLE OFFRE !\n" + random.choice(JOB_TEMPLATES).format(**job),
+                        buttons=[{'title': '📌 Voir offre', 'url': job['url']}]
                     )
-                    time.sleep(1)  # Rate limiting
+                    time.sleep(1)
                 
-                # Mark as notified
-                jobs_col.update_one(
-                    {"_id": job['_id']},
-                    {"$set": {
-                        "is_notified": True,
-                        "notified_at": datetime.utcnow()
-                    }}
-                )
+                jobs_col.update_one({"_id": job['_id']}, {"$set": {"is_notified": True}})
             
-            time.sleep(60)  # Check every minute
-            
+            time.sleep(60)
         except Exception as e:
             logger.error(f"Notification error: {str(e)}")
-            time.sleep(300)  # Wait 5 minutes on error
-
-# ---------- Health Check ----------
-@app.route('/health', methods=['GET'])
-def health_check():
-    try:
-        # Check database connection
-        mongo.admin.command('ping')
-        
-        # Check WhatsApp connection
-        test_msg = {"messaging_product": "whatsapp", "to": "test", "type": "text", "text": {"body": "test"}}
-        headers = {"Authorization": f"Bearer {Config.WA_ACCESS_TOKEN}", "Content-Type": "application/json"}
-        response = requests.post(Config.BASE_URL, headers=headers, json=test_msg)
-        
-        if response.status_code != 200:
-            raise Exception("WhatsApp API not responding")
-            
-        return jsonify({
-            "status": "healthy",
-            "database": "connected",
-            "whatsapp_api": "responsive",
-            "timestamp": datetime.utcnow().isoformat()
-        }), 200
-    
-    except Exception as e:
-        return jsonify({
-            "status": "unhealthy",
-            "error": str(e),
-            "timestamp": datetime.utcnow().isoformat()
-        }), 500
+            time.sleep(300)
 
 # ---------- Startup ----------
 if __name__ == '__main__':
     Config.validate()
-    
-    # Start notification thread
-    notification_thread = threading.Thread(target=notify_new_jobs, daemon=True)
-    notification_thread.start()
-    
-    # Start Flask server
+    threading.Thread(target=notify_new_jobs, daemon=True).start()
     logger.info(f"Starting server on port {Config.PORT}")
     serve(app, host='0.0.0.0', port=Config.PORT)
