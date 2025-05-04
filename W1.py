@@ -9,87 +9,125 @@ import offreBot
 
 app = Flask(__name__)
 
-# Configuration
-CONFIG = {
-    "WA_PHONE_ID": offreBot.WA_PHONE_ID,
-    "WA_ACCESS_TOKEN": offreBot.WA_ACCESS_TOKEN,
-    "WEBHOOK_SECRET": ("claudelAI223").encode('utf-8'),  # Encodé en bytes
-    "MONGO_URI": offreBot.MONGO_URI,
-    "PORT": int(os.getenv("PORT", 10000))
-}
+# Configuration améliorée
+class Config:
+    WEBHOOK_SECRET = ("claudelAI223").encode('utf-8')
+    MONGO_URI = offreBot.MONGO_URI
+    PORT = int(os.getenv("PORT", 10000))
 
-class WhatsAppJobBot:
-    def __init__(self):
-        self.db_client = MongoClient(
-            CONFIG["MONGO_URI"],
-            tls=True,
-            tlsCAFile=certifi.where()
-        )
-        self.db = self.db_client["job_bot_db"]
-        self.jobs = self.db["jobs"]
-        self.users = self.db["users"]
+    # Validation des paramètres
+    @classmethod
+    def validate(cls):
+        if not cls.WEBHOOK_SECRET:
+            raise ValueError("WEBHOOK_SECRET manquant")
+        if not cls.MONGO_URI:
+            raise ValueError("MONGO_URI manquant")
 
-    def verify_signature(self, request):
-        """Vérifie la signature du webhook WhatsApp"""
+# Initialisation de la base de données
+db_client = MongoClient(
+    Config.MONGO_URI,
+    tls=True,
+    tlsCAFile=certifi.where()
+)
+db = db_client["job_bot"]
+
+def verify_signature(request):
+    """Vérification robuste de la signature"""
+    try:
         signature_header = request.headers.get('X-Hub-Signature-256', '')
-        if not signature_header:
-            app.logger.error("Missing X-Hub-Signature-256 header")
+        if not signature_header.startswith('sha256='):
+            app.logger.error("Format de signature invalide")
             return False
             
-        sha_name, signature = signature_header.split('=')
-        if sha_name != 'sha256':
-            app.logger.error(f"Unsupported signature method: {sha_name}")
-            return False
+        received_signature = signature_header.split('=')[1]
+        generated_signature = hmac.new(
+            Config.WEBHOOK_SECRET,
+            request.get_data(),  # Utilisation des données brutes
+            digestmod=hashlib.sha256
+        ).hexdigest()
 
-        # Calcul de la signature attendue
-        mac = hmac.new(CONFIG["WEBHOOK_SECRET"], msg=request.data, digestmod=hashlib.sha256)
-        expected_signature = mac.hexdigest()
-
-        # Comparaison sécurisée des signatures
-        return hmac.compare_digest(signature, expected_signature)
-
-# Initialize bot
-bot = WhatsAppJobBot()
+        app.logger.debug(f"Signature reçue: {received_signature}")
+        app.logger.debug(f"Signature générée: {generated_signature}")
+        
+        return hmac.compare_digest(received_signature, generated_signature)
+        
+    except Exception as e:
+        app.logger.error(f"Erreur de vérification: {str(e)}")
+        return False
 
 @app.route('/webhook', methods=['GET'])
 def webhook_verification():
-    """Endpoint de vérification du webhook"""
-    mode = request.args.get('hub.mode')
-    token = request.args.get('hub.verify_token')
-    challenge = request.args.get('hub.challenge')
-    
-    if mode == 'subscribe' and token == CONFIG["WEBHOOK_SECRET"].decode('utf-8'):
-        app.logger.info("Webhook verified successfully")
-        return challenge, 200
-    
-    app.logger.error("Webhook verification failed")
-    return "Verification failed", 403
+    """Validation du webhook"""
+    try:
+        if (request.args.get('hub.mode') == 'subscribe' and 
+            request.args.get('hub.verify_token') == Config.WEBHOOK_SECRET.decode()):
+            return request.args['hub.challenge'], 200
+    except Exception as e:
+        app.logger.error(f"Erreur de validation: {str(e)}")
+    return "Échec de validation", 403
 
 @app.route('/webhook', methods=['POST'])
-def webhook_handler():
-    """Endpoint principal pour les webhooks"""
-    if not bot.verify_signature(request):
-        app.logger.warning("Invalid request signature")
-        return jsonify({"status": "invalid signature"}), 403
+def handle_webhook():
+    """Gestion des requêtes WhatsApp"""
+    if not verify_signature(request):
+        app.logger.warning("Requête non autorisée")
+        return jsonify(error="Signature invalide"), 403
 
     try:
         data = request.json
-        app.logger.debug(f"Received webhook data: {data}")
+        entry = data['entry'][0]['changes'][0]['value']
         
-        # Traitement de base pour confirmer la réception
-        return jsonify({"status": "success"}), 200
-        
-    except Exception as e:
-        app.logger.error(f"Error processing webhook: {str(e)}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+        # Gestion des messages
+        if 'messages' in entry:
+            message = entry['messages'][0]
+            return process_message(message)
+            
+        return jsonify(status="ok"), 200
 
-@app.route('/health')
-def health_check():
+    except Exception as e:
+        app.logger.error(f"Erreur de traitement: {str(e)}")
+        return jsonify(error="Erreur serveur"), 500
+
+def process_message(message):
+    """Traitement des messages entrants"""
+    user_id = message['from']
+    content = message['text']['body'].lower()
+    
+    # Enregistrement de l'activité
+    db.users.update_one(
+        {'user_id': user_id},
+        {'$set': {'last_active': datetime.utcnow()}},
+        upsert=True
+    )
+
+    # Réponse dynamique
+    responses = {
+        '/start': send_welcome,
+        '/menu': show_menu,
+        '/help': show_help
+    }
+    
+    handler = responses.get(content.split()[0], handle_unknown)
+    return handler(user_id)
+
+def send_welcome(user_id):
+    """Message de bienvenue interactif"""
     return jsonify({
-        "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat(),
-        "service": "whatsapp-job-bot"
-    })
+        "messaging_product": "whatsapp",
+        "to": user_id,
+        "type": "interactive",
+        "interactive": {
+            "type": "button",
+            "body": {"text": "👋 Bienvenue sur JobBot!"},
+            "action": {
+                "buttons": [
+                    {"type": "reply", "reply": {"id": "menu_jobs", "title": "📁 Offres"}},
+                    {"type": "reply", "reply": {"id": "menu_help", "title": "❓ Aide"}}
+                ]
+            }
+        }
+    }), 200
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=CONFIG["PORT"], debug=True)
+    Config.validate()
+    app.run(host='0.0.0.0', port=Config.PORT, debug=False)
