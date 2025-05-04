@@ -12,6 +12,7 @@ from pymongo import MongoClient
 import certifi
 from waitress import serve
 import requests
+import offreBot
 
 # ---------- Logging ----------
 logging.basicConfig(level=logging.INFO)
@@ -22,9 +23,9 @@ class Config:
     # WhatsApp webhook
     VERIFY_TOKEN = 'claudelAI223'
     APP_SECRET = b'7c61b31a0530bc3cc28f632a9b3e32be'
-    MONGO_URI = os.getenv('MONGO_URI', 'mongodb+srv://user:pass@cluster.mongodb.net/db')
-    WA_PHONE_ID = os.getenv('WA_PHONE_ID', '1234567890')
-    WA_ACCESS_TOKEN = os.getenv('WA_ACCESS_TOKEN', 'your_whatsapp_token')
+    MONGO_URI = offreBot.MONGO_URI
+    WA_PHONE_ID = offreBot.WA_PHONE_ID
+    WA_ACCESS_TOKEN = offreBot.WA_ACCESS_TOKEN
     PORT = int(os.getenv('PORT', 10000))
     BASE_URL = f"https://graph.facebook.com/v15.0/{WA_PHONE_ID}/messages"
     TELEGRAM_DEMO_URL = "https://t.me/yourchannel/video123"
