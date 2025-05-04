@@ -184,7 +184,7 @@ def show_categories(user: str):
 def send_jobs_page(user: str, jobs: list, category: str, page: int = 0):
     """Envoie une page d'offres d'emploi"""
     PER_PAGE = 5
-    total_pages = max(1, (len(jobs) + PER_PAGE - 1) // PER_PAGE
+    total_pages = max(1, (len(jobs) + PER_PAGE - 1)) // PER_PAGE
     page = max(0, min(page, total_pages - 1))
 
     # Préparation des données
