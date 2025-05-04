@@ -8,99 +8,102 @@ import certifi
 import logging
 import offreBot
 
-app = Flask(__name__)
-
 # Configuration du logging
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+app = Flask(__name__)
+
 class Config:
-    # Utilisation directe des variables d'environnement
+    # Configuration MongoDB améliorée
+    MONGO_URI = offreBot.MONGO_URI
     WA_PHONE_ID = offreBot.WA_PHONE_ID
     WA_ACCESS_TOKEN = offreBot.WA_ACCESS_TOKEN
     WEBHOOK_SECRET = ("claudelAI223").encode('utf-8')
-    MONGO_URI = offreBot.MONGO_URI
     PORT = int(os.getenv("PORT", 10000))
 
     @classmethod
     def validate(cls):
-        required = {
+        required_params = {
+            "MONGO_URI": cls.MONGO_URI,
             "WA_PHONE_ID": cls.WA_PHONE_ID,
-            "WA_ACCESS_TOKEN": cls.WA_ACCESS_TOKEN,
-            "MONGO_URI": cls.MONGO_URI
+            "WA_ACCESS_TOKEN": cls.WA_ACCESS_TOKEN
         }
-        for name, value in required.items():
+        for name, value in required_params.items():
             if not value:
-                raise ValueError(f"Configuration manquante: {name}")
+                raise ValueError(f"Paramètre manquant: {name}")
+
+def get_mongo_client():
+    """Crée une connexion MongoDB sécurisée avec timeout"""
+    return MongoClient(
+        Config.MONGO_URI,
+        tls=True,
+        tlsCAFile=certifi.where(),
+        serverSelectionTimeoutMS=5000,
+        connectTimeoutMS=3000,
+        socketTimeoutMS=3000
+    )
 
 def verify_signature(request):
-    """Vérification améliorée de la signature avec logging"""
+    """Vérification avancée de signature avec logging"""
     signature_header = request.headers.get('X-Hub-Signature-256', '')
-    logger.debug(f"Signature reçue: {signature_header}")
     
     if not signature_header.startswith('sha256='):
         logger.error("Format de signature invalide")
         return False
-        
-    received_signature = signature_header.split('=')[1]
-    payload = request.get_data()
     
-    # Génération de la signature attendue
+    received_signature = signature_header.split('=')[1]
     generated_signature = hmac.new(
         Config.WEBHOOK_SECRET,
-        payload,
+        request.get_data(),
         digestmod=hashlib.sha256
     ).hexdigest()
 
+    logger.debug(f"Signature reçue: {received_signature}")
     logger.debug(f"Signature générée: {generated_signature}")
     
     return hmac.compare_digest(received_signature, generated_signature)
 
 @app.route('/webhook', methods=['POST'])
 def handle_webhook():
-    """Gestionnaire de webhook avec meilleure gestion des erreurs"""
     if not verify_signature(request):
-        logger.warning("Échec de vérification de la signature")
-        return jsonify(error="Signature invalide"), 403
+        logger.warning("Tentative d'accès non autorisée")
+        return jsonify(error="Accès refusé"), 403
 
     try:
         data = request.get_json()
-        logger.debug(f"Données reçues: {data}")
+        logger.info(f"Reçu: {data}")
         
-        # Validation de la structure des données
-        if not all(key in data for key in ['entry']):
-            logger.error("Structure de données invalide")
-            return jsonify(error="Données malformées"), 400
-            
-        # Traitement du premier entry/changes
-        entry = data['entry'][0]['changes'][0]['value']
-        
-        if 'messages' in entry:
-            message = entry['messages'][0]
-            logger.info(f"Message reçu de {message['from']}")
-            return jsonify(status="Message traité"), 200
-            
-        return jsonify(status="Événement non traité"), 200
+        # Traitement de base
+        return jsonify(status="OK"), 200
 
     except Exception as e:
-        logger.error(f"Erreur de traitement: {str(e)}", exc_info=True)
+        logger.error(f"Erreur: {str(e)}", exc_info=True)
         return jsonify(error="Erreur serveur"), 500
 
-@app.route('/health', methods=['GET'])
+@app.route('/health')
 def health_check():
-    return jsonify({
-        "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat()
-    })
+    try:
+        # Vérification connexion MongoDB
+        with get_mongo_client() as client:
+            client.admin.command('ping')
+        return jsonify(
+            status="healthy",
+            mongo="connected",
+            timestamp=datetime.utcnow().isoformat()
+        ), 200
+    except Exception as e:
+        logger.error(f"Erreur MongoDB: {str(e)}")
+        return jsonify(
+            status="unhealthy",
+            mongo="disconnected",
+            error=str(e)
+        ), 500
 
 if __name__ == '__main__':
     Config.validate()
     
-    # Vérification de la connexion MongoDB
-    try:
-        MongoClient(Config.MONGO_URI, tls=True, tlsCAFile=certifi.where()).server_info()
-    except Exception as e:
-        logger.error(f"Erreur de connexion MongoDB: {str(e)}")
-        raise
-    
-    app.run(host='0.0.0.0', port=Config.PORT, debug=False)
+    # Configuration serveur de production
+    from waitress import serve
+    logger.info(f"Démarrage du serveur sur le port {Config.PORT}")
+    serve(app, host="0.0.0.0", port=Config.PORT)
