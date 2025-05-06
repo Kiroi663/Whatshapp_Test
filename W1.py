@@ -198,6 +198,19 @@ def verify():
 
 @app.route('/webhook',methods=['POST'])
 def receive():
+    raw = request.get_data()
+    sig = request.headers.get('X-Hub-Signature-256')
+    if not verify_signature(raw, sig):
+        logger.warning("Signature invalide: %s", sig)
+        return jsonify({"status":"invalid signature"}), 403
+    data = request.get_json()
+    logger.debug("Full webhook payload: %s", json.dumps(data))
+    for e in data.get('entry', []):
+        for ch in e.get('changes', []):
+            for m in ch['value'].get('messages', []):
+                logger.debug("Raw incoming message: %s", json.dumps(m))
+                handle_message(m)
+    return jsonify({"status":"success"}), 200
     raw=request.get_data();sig=request.headers.get('X-Hub-Signature-256')
     if not verify_signature(raw,sig):return jsonify({"status":"invalid"}),403
     for e in request.get_json().get('entry',[]):
