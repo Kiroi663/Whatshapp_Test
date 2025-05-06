@@ -252,25 +252,69 @@ def webhook_verify():
     return 'Échec de validation', 403
 
 @app.route('/webhook', methods=['POST'])
+# Modifier la fonction webhook_receive pour logger les requêtes entrante
 def webhook_receive():
     """Réception des messages avec validation de signature"""
     try:
         raw = request.get_data()
+        logger.debug("Requête reçue:\n%s", raw.decode('utf-8'))
+        
         if not verify_signature(raw, request.headers.get('X-Hub-Signature-256')):
+            logger.warning("Signature invalide rejetée")
             return jsonify({"status": "signature invalide"}), 403
 
         data = request.get_json()
+        logger.info("Payload JSON reçu: %s", json.dumps(data, indent=2))
+        
         for entry in data.get('entry', []):
             for change in entry.get('changes', []):
                 for msg in change['value'].get('messages', []):
+                    logger.debug(
+                        "Message traité - From: %s | Type: %s | Contenu: %s",
+                        msg.get('from'),
+                        msg.get('type'),
+                        msg.get('text', {}).get('body')
+                    )
                     if not validate_phone_number(msg['from']):
+                        logger.warning("Numéro invalide ignoré: %s", msg['from'])
                         continue
                     handle_message(msg)
         
         return jsonify({"status": "success"}), 200
     except Exception as e:
-        logger.error(f"Erreur webhook: {str(e)}")
+        logger.error("ERREUR WEBHOOK: %s", str(e), exc_info=True)
         return jsonify({"status": "error"}), 500
+
+# Ajouter ce logging dans handle_message
+def handle_message(msg: dict):
+    """Traite un message entrant"""
+    try:
+        user = msg['from']
+        text = extract_message_content(msg)
+        logger.info("Nouveau message - From: %s | Text: %s", user, text)
+        
+        if not text or user not in user_states or text in ['/START', 'START', 'MENU']:
+            logger.info("Démarrage nouvelle conversation pour: %s", user)
+            return start_conversation(user)
+            
+        state = user_states[user].get('state', 'MAIN_MENU')
+        logger.debug("État utilisateur: %s | Commande: %s", state, text)
+        
+        # ... reste du code inchangé ...
+        
+    except Exception as e:
+        logger.error("ERREUR handle_message: %s", str(e), exc_info=True)
+        send_whatsapp_message(user, "Erreur interne - Veuillez réessayer")
+
+# Ajouter cette configuration de logging au début
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('bot_debug.log'),
+        logging.StreamHandler()
+    ]
+)
 
 @app.route('/health', methods=['GET'])
 def health_check():
