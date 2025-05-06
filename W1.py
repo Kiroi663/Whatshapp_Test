@@ -71,17 +71,30 @@ def verify_signature(payload: bytes, signature_header: str) -> bool:
     return hmac.compare_digest(sig, expected)
 
 # Support text and interactive
-def extract_text(msg: dict) -> str:
-    mtype = msg.get('type')
-    if mtype == 'text':
-        return msg['text']['body'].strip().upper()
-    if mtype == 'interactive':
-        inter = msg['interactive']
-        if inter.get('type') == 'button_reply':
-            return inter['button_reply']['id']
-        if inter.get('type') == 'list_reply':
-            return inter['list_reply']['id']
-    return ''
+# On ajoute du logging sur interactive.type pour debug
+ def extract_text(msg: dict) -> str:
+     mtype = msg.get('type')
+     logger.debug("extract_text: message type = %s", mtype)
+     if mtype == 'text':
+         body = msg['text']['body'].strip().upper()
+         logger.debug("extract_text: text body = %s", body)
+         return body
+     if mtype == 'interactive':
+         inter = msg.get('interactive', {})
+         itype = inter.get('type')
+         logger.debug("extract_text: interactive type = %s", itype)
+         # bouton_reply for buttons
+         if 'button_reply' in inter:
+             bid = inter['button_reply'].get('id')
+             logger.debug("extract_text: button_reply id = %s", bid)
+             return bid
+         # list_reply for lists
+         if 'list_reply' in inter:
+             lid = inter['list_reply'].get('id')
+             logger.debug("extract_text: list_reply id = %s", lid)
+             return lid
+     logger.debug("extract_text: unknown message format, returning empty")
+     return ''
 
 # ---------- Message Builders ----------
 def create_message_payload(to: str, content: dict) -> dict:
