@@ -72,29 +72,29 @@ def verify_signature(payload: bytes, signature_header: str) -> bool:
 
 # Support text and interactive
 # On ajoute du logging sur interactive.type pour debug
- def extract_text(msg: dict) -> str:
-     mtype = msg.get('type')
-     logger.debug("extract_text: message type = %s", mtype)
-     if mtype == 'text':
-         body = msg['text']['body'].strip().upper()
-         logger.debug("extract_text: text body = %s", body)
-         return body
-     if mtype == 'interactive':
-         inter = msg.get('interactive', {})
-         itype = inter.get('type')
-         logger.debug("extract_text: interactive type = %s", itype)
-         # bouton_reply for buttons
-         if 'button_reply' in inter:
-             bid = inter['button_reply'].get('id')
-             logger.debug("extract_text: button_reply id = %s", bid)
-             return bid
-         # list_reply for lists
-         if 'list_reply' in inter:
-             lid = inter['list_reply'].get('id')
-             logger.debug("extract_text: list_reply id = %s", lid)
-             return lid
-     logger.debug("extract_text: unknown message format, returning empty")
-     return ''
+def extract_text(msg: dict) -> str:
+    mtype = msg.get('type')
+    logger.debug("extract_text: message type = %s", mtype)
+    if mtype == 'text':
+        body = msg['text']['body'].strip().upper()
+        logger.debug("extract_text: text body = %s", body)
+        return body
+    if mtype == 'interactive':
+        inter = msg.get('interactive', {})
+        itype = inter.get('type')
+        logger.debug("extract_text: interactive type = %s", itype)
+        # bouton_reply for buttons
+        if 'button_reply' in inter:
+            bid = inter['button_reply'].get('id')
+            logger.debug("extract_text: button_reply id = %s", bid)
+            return bid
+        # list_reply for lists
+        if 'list_reply' in inter:
+            lid = inter['list_reply'].get('id')
+            logger.debug("extract_text: list_reply id = %s", lid)
+            return lid
+    logger.debug("extract_text: unknown message format, returning empty")
+    return ''
 
 # ---------- Message Builders ----------
 def create_message_payload(to: str, content: dict) -> dict:
