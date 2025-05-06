@@ -97,7 +97,7 @@ def make_button_list(text: str, buttons: list) -> dict:
 
 def make_list_message(text: str, rows: list) -> dict:
     section = {"title": "Catégories", "rows": rows}
-    return {"type": "interactive", "interactive": {"type": "list", "body": {"text": text}, "action": {"button": "Sélectionner", "sections": [section]}}}
+    return {"type": "interactive", "interactive": {"type": "list", "body": {"text": text}, "action": {"button": "Choisir", "sections": [section]}}}
 
 
 def send_message(to: str, content: dict) -> bool:
@@ -114,21 +114,20 @@ def send_message(to: str, content: dict) -> bool:
 
 # ---------- User State ----------
 user_states = {}
-# state: MAIN_MENU, BROWSING, FAVORITES
 
 # ---------- Handlers ----------
 def start_conversation(user: str):
     text = "🌟 Bienvenue sur JobFinder 🌟\nQue voulez-vous faire ?"
     buttons = [
-        {"type": "reply", "reply": {"id": "EXPLORE", "title": "🔍 Explorer les offres"}},
-        {"type": "reply", "reply": {"id": "FAVS",    "title": "⭐ Voir mes favoris"}}
+        {"type": "reply", "reply": {"id": "EXPLORE", "title": "Explorer"}},
+        {"type": "reply", "reply": {"id": "FAVS",    "title": "Favoris"}}
     ]
     send_message(user, make_button_list(text, buttons))
     user_states[user] = {"state": "MAIN_MENU"}
 
 
 def show_categories(user: str):
-    rows = [{"id": f"CAT_{i}", "title": cat} for i, cat in enumerate(CATEGORIES)]
+    rows = [{"id": f"CAT_{i}", "title": cat[:20]} for i, cat in enumerate(CATEGORIES)]
     send_message(user, make_list_message("Sélectionnez une catégorie :", rows))
     user_states[user] = {"state": "BROWSING", "mode": "CATEGORY_MENU"}
 
@@ -143,19 +142,18 @@ def list_jobs_page(user: str, category: str, page: int = 0):
     items = jobs[start:start+per_page]
 
     for job in items:
-        text = f"*{job.get('title')}* chez *{job.get('company')}*\n{job.get('location')}"
-        btn = [{"type": "url", "url": job.get('url', '#'), "title": "📝 Postuler"}]
+        text = f"{job.get('title')} chez {job.get('company')}\n{job.get('location')}"
+        btn = [{"type": "url", "url": job.get('url', '#'), "title": "Postuler"}]
         send_message(user, make_button_list(text, btn))
         time.sleep(0.5)
 
-    # navigation
     nav = []
     if page > 0:
-        nav.append({"type": "reply", "reply": {"id": f"PAGE_{category}_{page-1}", "title": "⬅️ Précédent"}})
+        nav.append({"type": "reply", "reply": {"id": f"PAGE_{category}_{page-1}", "title": "⏪"}})
     if page < pages - 1:
-        nav.append({"type": "reply", "reply": {"id": f"PAGE_{category}_{page+1}", "title": "Suivant ➡️"}})
-    nav.append({"type": "reply", "reply": {"id": "BACK_CATS", "title": "🔙 Retour"}})
-    send_message(user, make_button_list(f"Page {page+1}/{pages} - {total} offres", nav))
+        nav.append({"type": "reply", "reply": {"id": f"PAGE_{category}_{page+1}", "title": "⏩"}})
+    nav.append({"type": "reply", "reply": {"id": "BACK_CATS", "title": "Retour"}})
+    send_message(user, make_button_list(f"Page {page+1}/{pages}", nav))
     user_states[user].update({"category": category, "page": page})
 
 
@@ -165,11 +163,11 @@ def show_favorites_menu(user: str):
     rows = []
     for i, cat in enumerate(CATEGORIES):
         mark = '✅' if cat in current else '◻️'
-        rows.append({"id": f"FAV_{i}", "title": f"{mark} {cat}"})
+        rows.append({"id": f"FAV_{i}", "title": f"{mark} {cat[:18]}"})
     send_message(user, make_list_message("Gérez vos notifications :", rows))
     user_states[user] = {"state": "FAVORITES"}
 
-# ---------- Main Message Router ----------
+# ---------- Main Router ----------
 def handle_message(msg: dict):
     raw = msg['from']
     try:
@@ -181,41 +179,28 @@ def handle_message(msg: dict):
     logger.info("Message %s: %s", user, text)
 
     state = user_states.get(user, {}).get('state')
-    # start or main menu
     if text in ['/START', 'START'] or state is None:
         return start_conversation(user)
 
-    # MAIN_MENU actions
     if state == 'MAIN_MENU':
-        if text == 'EXPLORE':
-            return show_categories(user)
-        if text == 'FAVS':
-            return show_favorites_menu(user)
+        if text == 'EXPLORE': return show_categories(user)
+        if text == 'FAVS':    return show_favorites_menu(user)
 
-    # BROWSING state
     if state == 'BROWSING':
-        mode = user_states[user].get('mode')
         if text.startswith('CAT_'):
-            idx = int(text.split('_')[1])
-            cat = CATEGORIES[idx]
-            return list_jobs_page(user, cat, 0)
-        if text == 'BACK_CATS':
-            return show_categories(user)
+            idx = int(text.split('_')[1]); return list_jobs_page(user, CATEGORIES[idx], 0)
+        if text == 'BACK_CATS': return show_categories(user)
         if text.startswith('PAGE_'):
-            _, cat, pg = text.split('_')
-            return list_jobs_page(user, cat, int(pg))
+            _, cat, pg = text.split('_'); return list_jobs_page(user, cat, int(pg))
 
-    # FAVORITES state
     if state == 'FAVORITES':
         if text.startswith('FAV_'):
-            idx = int(text.split('_')[1])
+            idx = int(text.split('_')[1]);
             cat = CATEGORIES[idx]
             favs = favs_col.find_one({"user_id": user}) or {"categories": []}
             current = favs.get('categories', [])
-            if cat in current:
-                current.remove(cat)
-            else:
-                current.append(cat)
+            if cat in current: current.remove(cat)
+            else:            current.append(cat)
             favs_col.update_one({"user_id": user}, {"$set": {"categories": current}}, upsert=True)
             return show_favorites_menu(user)
 
@@ -232,8 +217,7 @@ def notify_new_jobs():
                             u['user_id'],
                             {"type":"text","text":{"body":f"🚨 Nouvelle offre: {job.get('title')}"}}
                         )
-                    except Exception:
-                        pass
+                    except: pass
                 jobs_col.update_one({"_id": job['_id']}, {"$set": {"is_notified": True}})
             time.sleep(60)
         except Exception as e:
@@ -243,34 +227,25 @@ def notify_new_jobs():
 # ---------- Webhook Endpoints ----------
 @app.route('/webhook', methods=['GET'])
 def webhook_verify():
-    mode = request.args.get('hub.mode')
-    token = request.args.get('hub.verify_token')
-    challenge = request.args.get('hub.challenge')
-    if mode == 'subscribe' and token == Config.VERIFY_TOKEN:
-        return challenge, 200
-    return 'Forbidden', 403
+    mode = request.args.get('hub.mode'); token = request.args.get('hub.verify_token'); challenge = request.args.get('hub.challenge')
+    if mode=='subscribe' and token==Config.VERIFY_TOKEN: return challenge,200
+    return 'Forbidden',403
 
 @app.route('/webhook', methods=['POST'])
 def webhook_receive():
-    raw = request.get_data()
-    sig = request.headers.get('X-Hub-Signature-256')
-    if not verify_signature(raw, sig):
-        return jsonify({"status":"invalid signature"}), 403
+    raw = request.get_data(); sig = request.headers.get('X-Hub-Signature-256')
+    if not verify_signature(raw,sig): return jsonify({"status":"invalid"}),403
     data = request.get_json()
-    for entry in data.get('entry', []):
-        for ch in entry.get('changes', []):
-            for m in ch['value'].get('messages', []):
-                handle_message(m)
-    return jsonify({"status":"success"}), 200
+    for e in data.get('entry',[]):
+        for ch in e.get('changes',[]):
+            for m in ch['value'].get('messages',[]): handle_message(m)
+    return jsonify({"status":"success"}),200
 
 # ---------- Health Check ----------
 @app.route('/health', methods=['GET'])
 def health():
-    try:
-        mongo.admin.command('ping')
-        return "OK", 200
-    except:
-        return "DB error", 500
+    try: mongo.admin.command('ping'); return "OK",200
+    except: return "DB error",500
 
 # ---------- Main ----------
 if __name__ == '__main__':
