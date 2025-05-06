@@ -16,7 +16,6 @@ import requests
 import offreBot
 
 
-
 # ---------- Configuration Logging ----------
 logging.basicConfig(
     level=logging.DEBUG,
@@ -85,12 +84,10 @@ def extract_text(msg: dict) -> str:
         inter = msg.get('interactive', {})
         itype = inter.get('type')
         logger.debug("extract_text: interactive type = %s", itype)
-        # bouton_reply for buttons
         if 'button_reply' in inter:
             bid = inter['button_reply'].get('id')
             logger.debug("extract_text: button_reply id = %s", bid)
             return bid
-        # list_reply for lists
         if 'list_reply' in inter:
             lid = inter['list_reply'].get('id')
             logger.debug("extract_text: list_reply id = %s", lid)
@@ -106,7 +103,8 @@ def make_button_list(text: str, buttons: list) -> dict:
     return {"type":"interactive","interactive":{"type":"button","body":{"text":text},"action":{"buttons":buttons}}}
 
 def make_list_message(text: str, rows: list) -> dict:
-    section = {"title":"Catégories","rows":rows}
+    # limit rows to 5
+    section = {"title":"Catégories","rows":rows[:5]}
     return {"type":"interactive","interactive":{"type":"list","body":{"text":text},"action":{"button":"Choisir","sections":[section]}}}
 
 # ---------- Sender ----------
@@ -191,15 +189,12 @@ def handle_message(msg: dict):
         if text == 'FAVS':    return show_favorites_menu(user)
     if state == 'BROWSING':
         if text.startswith('CAT_'):
-            idx = int(text.split('_')[1])
-            return list_jobs_page(user, CATEGORIES[idx], 0)
+            idx = int(text.split('_')[1]); return list_jobs_page(user, CATEGORIES[idx], 0)
         if text == 'BACK_CATS': return show_categories(user)
         if text.startswith('PAGE_'):
-            _,cat,pg = text.split('_')
-            return list_jobs_page(user, cat, int(pg))
+            _,cat,pg = text.split('_'); return list_jobs_page(user, cat, int(pg))
     if state == 'FAVORITES' and text.startswith('FAV_'):
-        idx = int(text.split('_')[1])
-        cat = CATEGORIES[idx]
+        idx = int(text.split('_')[1]); cat = CATEGORIES[idx]
         favs = favs_col.find_one({"user_id": user}) or {"categories": []}
         cur = favs.get('categories', [])
         if cat in cur: cur.remove(cat)
@@ -214,10 +209,8 @@ def notify_new_jobs():
             for job in jobs_col.find({"is_notified": False}):
                 cat = job.get('category')
                 for u in favs_col.find({"categories": cat}):
-                    try:
-                        send_message(u['user_id'], {"type":"text","text":{"body":f"🚨 Nouvelle offre: {job.get('title')}"}})
-                    except:
-                        pass
+                    try: send_message(u['user_id'], {"type":"text","text":{"body":f"🚨 Nouvelle offre: {job.get('title')}"}})
+                    except: pass
                 jobs_col.update_one({"_id": job['_id']},{"$set":{"is_notified": True, "notified_at": datetime.utcnow()}})
             time.sleep(60)
         except Exception as e:
@@ -227,20 +220,14 @@ def notify_new_jobs():
 # ---------- Webhook ----------
 @app.route('/webhook', methods=['GET'])
 def verify():
-    mode  = request.args.get('hub.mode')
-    token = request.args.get('hub.verify_token')
-    challenge = request.args.get('hub.challenge')
+    mode  = request.args.get('hub.mode'); token = request.args.get('hub.verify_token'); challenge = request.args.get('hub.challenge')
     return (challenge,200) if mode=='subscribe' and token==Config.VERIFY_TOKEN else ('Forbidden',403)
 
 @app.route('/webhook', methods=['POST'])
 def receive():
-    raw = request.get_data()
-    sig  = request.headers.get('X-Hub-Signature-256')
-    if not verify_signature(raw, sig):
-        logger.warning("Signature invalide: %s", sig)
-        return jsonify({"status":"invalid signature"}),403
-    data = request.get_json()
-    logger.debug("Full webhook payload: %s", json.dumps(data))
+    raw = request.get_data(); sig  = request.headers.get('X-Hub-Signature-256')
+    if not verify_signature(raw, sig): logger.warning("Signature invalide: %s", sig); return jsonify({"status":"invalid signature"}),403
+    data = request.get_json(); logger.debug("Full webhook payload: %s", json.dumps(data))
     for e in data.get('entry', []):
         for ch in e.get('changes', []):
             for m in ch['value'].get('messages', []):
@@ -251,14 +238,12 @@ def receive():
 # ---------- Health ----------
 @app.route('/health', methods=['GET'])
 def health():
-    try:
-        mongo.admin.command('ping')
-        return "OK",200
-    except:
-        return "DB error",500
+    try: mongo.admin.command('ping'); return "OK",200
+    except: return "DB error",500
 
 # ---------- Main ----------
 if __name__ == '__main__':
     Config.validate()
     threading.Thread(target=notify_new_jobs, daemon=True).start()
     serve(app, host='0.0.0.0', port=Config.PORT)
+
