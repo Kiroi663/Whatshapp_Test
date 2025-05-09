@@ -3,18 +3,16 @@ import hmac
 import hashlib
 import json
 import logging
-import random
+import re
 import time
 import threading
-import re
 from datetime import datetime
 from flask import Flask, request, jsonify
 from pymongo import MongoClient
 import certifi
 from waitress import serve
 import requests
-import 
-
+import offreBot
 
 # ---------- Configuration Logging ----------
 logging.basicConfig(
@@ -27,223 +25,225 @@ logger = logging.getLogger(__name__)
 # ---------- Flask App ----------
 app = Flask(__name__)
 
-# ---------- Bot Configuration ----------
+# ---------- Configuration ----------
 class Config:
-    VERIFY_TOKEN    = 'claudelAI223'
-    APP_SECRET      = b'7c61b31a0530bc3cc28f632a9b3e32be'
-    MONGO_URI       = offreBot.MONGO_URI
-    WA_PHONE_ID     = offreBot.WA_PHONE_ID
+    VERIFY_TOKEN = 'claudelAI223'
+    APP_SECRET = b'7c61b31a0530bc3cc28f632a9b3e32be'
+    MONGO_URI = offreBot.MONGO_URI
+    WA_PHONE_ID = offreBot.WA_PHONE_ID
     WA_ACCESS_TOKEN = offreBot.WA_ACCESS_TOKEN
-    TEST_NUMBER     = offreBot.TEST_NUMBER
-    PORT            = int(os.getenv('PORT', 10000))
-    BASE_URL        = f"https://graph.facebook.com/v18.0/{WA_PHONE_ID}/messages"
+    TEST_NUMBER = offreBot.TEST_NUMBER
+    PORT = int(os.getenv('PORT', 10000))
+    BASE_URL = f"https://graph.facebook.com/v18.0/{WA_PHONE_ID}/messages"
 
     @classmethod
     def validate(cls):
-        required = {k: getattr(cls, k) for k in ['MONGO_URI','WA_PHONE_ID','WA_ACCESS_TOKEN','TEST_NUMBER']}
-        missing = [k for k,v in required.items() if not v]
+        required = ['MONGO_URI', 'WA_PHONE_ID', 'WA_ACCESS_TOKEN']
+        missing = [k for k in required if not getattr(cls, k)]
         if missing:
             raise ValueError(f"Configuration manquante: {', '.join(missing)}")
 
 # ---------- Database ----------
-mongo     = MongoClient(Config.MONGO_URI, tls=True, tlsCAFile=certifi.where())
-db        = mongo['job_database']
-jobs_col  = db['christ']
-favs_col  = db['user_favorites']
+mongo = MongoClient(Config.MONGO_URI, tlsCAFile=certifi.where())
+db = mongo.job_database
+jobs_col = db.christ  # Collection validée
+favs_col = db.user_favorites
 
-# ---------- Constants ----------
+# ---------- Constantes ----------
 CATEGORIES = [
-    "Informatique / IT","Finance / Comptabilité","Communication / Marketing",
-    "Conseil / Stratégie","Transport / Logistique","Ingénierie / BTP",
-    "Santé / Médical","Éducation / Formation","Ressources humaines",
-    "Droit / Juridique","Environnement","Alternance / Stage","Remote","Autre"
+    "Informatique / IT",
+    "Finance / Comptabilité",
+    "Communication / Marketing",
+    "Conseil / Stratégie",
+    "Transport / Logistique",
+    "Ingénierie / BTP",
+    "Santé / Médical",
+    "Éducation / Formation",
+    "Ressources humaines",
+    "Droit / Juridique",
+    "Environnement",
+    "Alternance / Stage",
+    "Remote",
+    "Autre"
 ]
 
-# ---------- Utilities ----------
-def normalize_and_validate(number: str) -> str:
-    if number.isdigit(): number = '+' + number
-    if not re.match(r'^\+\d{10,15}$', number): raise ValueError(f"Numéro invalide: {number}")
-    return number
+# ---------- Utilitaires ----------
+def normalize_number(number: str) -> str:
+    number = number.lstrip('+')
+    if not re.match(r'^\d{10,15}$', number):
+        raise ValueError("Format de numéro invalide")
+    return f"+{number}"
 
-def verify_signature(payload: bytes, signature_header: str) -> bool:
-    if not signature_header or not signature_header.startswith('sha256='): return False
-    sig      = signature_header.split('sha256=')[1].strip()
-    expected = hmac.new(Config.APP_SECRET, payload, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(sig, expected)
+def verify_signature(payload: bytes, signature: str) -> bool:
+    digest = hmac.new(Config.APP_SECRET, payload, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(f"sha256={digest}", signature)
 
-# Support text and interactive
-# On ajoute du logging sur interactive.type pour debug
-def extract_text(msg: dict) -> str:
-    mtype = msg.get('type')
-    logger.debug("extract_text: message type = %s", mtype)
-    if mtype == 'text':
-        body = msg['text']['body'].strip().upper()
-        logger.debug("extract_text: text body = %s", body)
-        return body
-    if mtype == 'interactive':
-        inter = msg.get('interactive', {})
-        itype = inter.get('type')
-        logger.debug("extract_text: interactive type = %s", itype)
-        if 'button_reply' in inter:
-            bid = inter['button_reply'].get('id')
-            logger.debug("extract_text: button_reply id = %s", bid)
-            return bid
-        if 'list_reply' in inter:
-            lid = inter['list_reply'].get('id')
-            logger.debug("extract_text: list_reply id = %s", lid)
-            return lid
-    logger.debug("extract_text: unknown message format, returning empty")
-    return ''
+def create_message(to: str, content: dict) -> dict:
+    return {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": to,
+        **content
+    }
 
-# ---------- Message Builders ----------
-def create_message_payload(to: str, content: dict) -> dict:
-    return {"messaging_product":"whatsapp","to":to,**content}
-
-def make_button_list(text: str, buttons: list) -> dict:
-    return {"type":"interactive","interactive":{"type":"button","body":{"text":text},"action":{"buttons":buttons}}}
-
-def make_list_message(text: str, rows: list) -> dict:
-    # limit rows to 5
-    section = {"title":"Catégories","rows":rows[:5]}
-    return {"type":"interactive","interactive":{"type":"list","body":{"text":text},"action":{"button":"Choisir","sections":[section]}}}
-
-# ---------- Sender ----------
-def send_message(to: str, content: dict) -> bool:
-    try:
-        payload = create_message_payload(to, content)
-        headers = {"Authorization":f"Bearer {Config.WA_ACCESS_TOKEN}","Content-Type":"application/json"}
-        res = requests.post(Config.BASE_URL,headers=headers,json=payload)
-        if not res.ok:
-            logger.error("Échec envoi %s: %s", to, res.text)
-        return res.ok
-    except Exception as e:
-        logger.error("Erreur send_message: %s", e)
-        return False
-
-# ---------- State ----------
+# ---------- Gestion des états ----------
 user_states = {}
 
-# ---------- Handlers ----------
-def start_conversation(user: str):
-    text = "🌟 Bienvenue sur JobFinder 🌟\nQue voulez-vous faire ?"
-    btns = [
-        {"type":"reply","reply":{"id":"EXPLORE","title":"Explorer"}},
-        {"type":"reply","reply":{"id":"FAVS","title":"Favoris"}}
+def reset_state(user: str):
+    user_states.pop(user, None)
+
+# ---------- Templates de messages ----------
+def text_message(text: str) -> dict:
+    return {"type": "text", "text": {"body": text}}
+
+def list_message(header: str, rows: list) -> dict:
+    return {
+        "type": "interactive",
+        "interactive": {
+            "type": "list",
+            "body": {"text": header},
+            "action": {
+                "button": "Options",
+                "sections": [{
+                    "title": "Catégories",
+                    "rows": rows[:10]
+                }]
+            }
+        }
+    }
+
+# ---------- Logique métier ----------
+def start_flow(user: str):
+    reset_state(user)
+    message = "🌟 Bienvenue sur JobBot! Choisissez une action :"
+    buttons = [
+        {"type": "reply", "reply": {"id": "BROWSE", "title": "Parcourir les offres"}},
+        {"type": "reply", "reply": {"id": "FAVORITES", "title": "Mes favoris"}}
     ]
-    send_message(user, make_button_list(text, btns))
-    user_states[user] = {"state":"MAIN_MENU"}
+    send_whatsapp(user, {
+        "type": "interactive",
+        "interactive": {
+            "type": "button",
+            "body": {"text": message},
+            "action": {"buttons": buttons}
+        }
+    })
+    user_states[user] = {"state": "MAIN_MENU"}
 
 def show_categories(user: str):
-    rows = [{"id":f"CAT_{i}","title":cat[:20]} for i,cat in enumerate(CATEGORIES)]
-    send_message(user, make_list_message("Sélectionnez une catégorie :", rows))
-    user_states[user] = {"state":"BROWSING","mode":"CATEGORY_MENU"}
+    rows = [{"id": f"CAT_{i}", "title": cat} for i, cat in enumerate(CATEGORIES)]
+    send_whatsapp(user, list_message("Choisissez une catégorie :", rows))
+    user_states[user] = {"state": "CATEGORY_SELECTION"}
 
-def list_jobs_page(user: str, category: str, page: int = 0):
-    query = {} if category == 'all' else {"category": category}
-    jobs = list(jobs_col.find(query))
-    per = 5; tot = len(jobs)
-    pages = (tot + per - 1)//per
-    start = page * per
-    items = jobs[start:start+per]
-    for job in items:
-        title = job.get('title','-')
-        comp  = job.get('company','-')
-        loc   = job.get('location','-')
-        text  = f"📌 {title} chez {comp}\n📍 {loc}"
-        btn   = [{"type":"url","url":job.get('url','#'),"title":"Postuler"}]
-        send_message(user, make_button_list(text, btn))
-        time.sleep(0.3)
-    nav = []
-    if page > 0:
-        nav.append({"type":"reply","reply":{"id":f"PAGE_{category}_{page-1}","title":"⏪"}})
-    if page < pages-1:
-        nav.append({"type":"reply","reply":{"id":f"PAGE_{category}_{page+1}","title":"⏩"}})
-    nav.append({"type":"reply","reply":{"id":"BACK_CATS","title":"Retour"}})
-    send_message(user, make_button_list(f"Page {page+1}/{pages}", nav))
-    user_states[user].update({"category":category,"page":page})
-
-def show_favorites_menu(user: str):
-    favs = favs_col.find_one({"user_id": user}) or {"categories": []}
-    current = favs.get('categories', [])
-    rows = []
-    for i,cat in enumerate(CATEGORIES):
-        mark = '✅' if cat in current else '◻️'
-        rows.append({"id":f"FAV_{i}","title":f"{mark} {cat[:18]}"})
-    send_message(user, make_list_message("Gérez vos notifications :", rows))
-    user_states[user] = {"state":"FAVORITES"}
-
-# ---------- Router ----------
-def handle_message(msg: dict):
-    raw = msg.get('from')
+def send_jobs_page(user: str, category: str, page: int = 0):
     try:
-        user = normalize_and_validate(raw)
-    except:
-        return logger.warning("Numéro invalide %s", raw)
-    text = extract_text(msg)
-    logger.info("MSG %s: %s", user, text)
-    state = user_states.get(user, {}).get('state')
-    if text in ['/START','START'] or state is None:
-        return start_conversation(user)
-    if state == 'MAIN_MENU':
-        if text == 'EXPLORE': return show_categories(user)
-        if text == 'FAVS':    return show_favorites_menu(user)
-    if state == 'BROWSING':
-        if text.startswith('CAT_'):
-            idx = int(text.split('_')[1]); return list_jobs_page(user, CATEGORIES[idx], 0)
-        if text == 'BACK_CATS': return show_categories(user)
-        if text.startswith('PAGE_'):
-            _,cat,pg = text.split('_'); return list_jobs_page(user, cat, int(pg))
-    if state == 'FAVORITES' and text.startswith('FAV_'):
-        idx = int(text.split('_')[1]); cat = CATEGORIES[idx]
-        favs = favs_col.find_one({"user_id": user}) or {"categories": []}
-        cur = favs.get('categories', [])
-        if cat in cur: cur.remove(cat)
-        else:          cur.append(cat)
-        favs_col.update_one({"user_id": user},{"$set":{"categories":cur}}, upsert=True)
-        return show_favorites_menu(user)
+        category_name = CATEGORIES[int(category)]
+        query = {"category": category_name}
+        total = jobs_col.count_documents(query)
+        per_page = 5
+        
+        jobs = list(jobs_col.find(query)
+            .sort("created_at", -1)
+            .skip(page * per_page)
+            .limit(per_page))
+        
+        if not jobs:
+            send_whatsapp(user, text_message("Aucune offre disponible dans cette catégorie"))
+            return
 
-# ---------- Notifications ----------
-def notify_new_jobs():
-    while True:
-        try:
-            for job in jobs_col.find({"is_notified": False}):
-                cat = job.get('category')
-                for u in favs_col.find({"categories": cat}):
-                    try: send_message(u['user_id'], {"type":"text","text":{"body":f"🚨 Nouvelle offre: {job.get('title')}"}})
-                    except: pass
-                jobs_col.update_one({"_id": job['_id']},{"$set":{"is_notified": True, "notified_at": datetime.utcnow()}})
-            time.sleep(60)
-        except Exception as e:
-            logger.error("notify err: %s", e)
-            time.sleep(300)
+        for job in jobs:
+            response = f"""📌 {job.get('title', 'Sans titre')}
+🏢 {job.get('company', 'Entreprise non spécifiée')}
+📍 {job.get('location', 'Localisation non précisée')}
+🔗 {job.get('url', '#')}"""
+            send_whatsapp(user, text_message(response))
+            time.sleep(0.5)
 
-# ---------- Webhook ----------
+        # Navigation
+        buttons = []
+        if page > 0:
+            buttons.append({
+                "type": "reply",
+                "reply": {"id": f"PAGE_{category}_{page-1}", "title": "◀️ Précédent"}
+            })
+        
+        if (page + 1) * per_page < total:
+            buttons.append({
+                "type": "reply",
+                "reply": {"id": f"PAGE_{category}_{page+1}", "title": "Suivant ▶️"}
+            })
+        
+        buttons.append({
+            "type": "reply", 
+            "reply": {"id": "BACK_CAT", "title": "🔙 Catégories"}
+        })
+        
+        send_whatsapp(user, {
+            "type": "interactive",
+            "interactive": {
+                "type": "button",
+                "body": {"text": f"Page {page+1}"},
+                "action": {"buttons": buttons}
+            }
+        })
+        
+        user_states[user] = {
+            "state": "BROWSING",
+            "category": category,
+            "page": page
+        }
+
+    except Exception as e:
+        logger.error(f"Erreur d'envoi des offres : {str(e)}")
+        send_whatsapp(user, text_message("Une erreur est survenue"))
+
+# ---------- Gestion des webhooks ----------
 @app.route('/webhook', methods=['GET'])
-def verify():
-    mode  = request.args.get('hub.mode'); token = request.args.get('hub.verify_token'); challenge = request.args.get('hub.challenge')
-    return (challenge,200) if mode=='subscribe' and token==Config.VERIFY_TOKEN else ('Forbidden',403)
+def webhook_verify():
+    if request.args.get('hub.mode') == 'subscribe' and request.args.get('hub.verify_token') == Config.VERIFY_TOKEN:
+        return request.args.get('hub.challenge'), 200
+    return "Forbidden", 403
 
 @app.route('/webhook', methods=['POST'])
-def receive():
-    raw = request.get_data(); sig  = request.headers.get('X-Hub-Signature-256')
-    if not verify_signature(raw, sig): logger.warning("Signature invalide: %s", sig); return jsonify({"status":"invalid signature"}),403
-    data = request.get_json(); logger.debug("Full webhook payload: %s", json.dumps(data))
-    for e in data.get('entry', []):
-        for ch in e.get('changes', []):
-            for m in ch['value'].get('messages', []):
-                logger.debug("Raw incoming message: %s", json.dumps(m))
-                handle_message(m)
-    return jsonify({"status":"success"}),200
+def webhook_receive():
+    try:
+        payload = request.get_data()
+        if not verify_signature(payload, request.headers.get('X-Hub-Signature-256', '')):
+            return jsonify({"status": "invalid signature"}), 403
+        
+        data = request.json
+        for entry in data.get('entry', []):
+            for change in entry.get('changes', []):
+                for message in change.get('value', {}).get('messages', []):
+                    process_message(message)
+        
+        return jsonify({"status": "success"}), 200
+    except Exception as e:
+        logger.error(f"Erreur webhook : {str(e)}")
+        return jsonify({"status": "error"}), 500
 
-# ---------- Health ----------
-@app.route('/health', methods=['GET'])
-def health():
-    try: mongo.admin.command('ping'); return "OK",200
-    except: return "DB error",500
+def process_message(msg: dict):
+    try:
+        user = normalize_number(msg['from'])
+        message_type = msg.get('type')
+        
+        if message_type == 'text':
+            handle_text(user, msg['text']['body'].strip())
+        elif message_type == 'interactive':
+            handle_interactive(user, msg['interactive'])
+            
+    except Exception as e:
+        logger.error(f"Erreur traitement message : {str(e)}")
 
-# ---------- Main ----------
+# ---------- Lancement ----------
 if __name__ == '__main__':
     Config.validate()
-    threading.Thread(target=notify_new_jobs, daemon=True).start()
+    
+    # Nettoyage initial des données
+    jobs_col.update_many(
+        {"category": "Rouder"},
+        {"$set": {"category": "Remote"}}
+    )
+    
+    # Démarrage serveur
     serve(app, host='0.0.0.0', port=Config.PORT)
-
