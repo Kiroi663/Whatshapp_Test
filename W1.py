@@ -235,6 +235,59 @@ def process_message(msg: dict):
     except Exception as e:
         logger.error(f"Erreur traitement message : {str(e)}")
 
+# ---------- Gestion des messages texte ----------
+def handle_text(user: str, text: str):
+    text = text.upper()
+    state = user_states.get(user, {}).get("state")
+    
+    logger.debug(f"Traitement texte: {text} | State: {state}")
+    
+    if text in ["/START", "START"]:
+        start_flow(user)
+    elif state == "MAIN_MENU":
+        if text == "BROWSE":
+            show_categories(user)
+        elif text == "FAVORITES":
+            show_favorites(user)
+    elif state == "BROWSING":
+        if text.startswith("PAGE_"):
+            _, category, page = text.split("_")
+            send_jobs_page(user, category, int(page))
+        elif text == "BACK_CAT":
+            show_categories(user)
+    else:
+        start_flow(user)
+
+# ---------- Gestion des interactions ----------
+def handle_interactive(user: str, interactive: dict):
+    itype = interactive.get("type")
+    
+    if itype == "list_reply":
+        selected_id = interactive["list_reply"]["id"]
+        if selected_id.startswith("CAT_"):
+            category_index = int(selected_id.split("_")[1])
+            send_jobs_page(user, str(category_index), 0)
+            
+    elif itype == "button_reply":
+        button_id = interactive["button_reply"]["id"]
+        handle_text(user, button_id)
+
+# ---------- Envoi WhatsApp ----------
+def send_whatsapp(to: str, content: dict):
+    try:
+        payload = create_message(to, content)
+        headers = {
+            "Authorization": f"Bearer {Config.WA_ACCESS_TOKEN}",
+            "Content-Type": "application/json"
+        }
+        response = requests.post(Config.BASE_URL, headers=headers, json=payload)
+        
+        if response.status_code != 200:
+            logger.error(f"Erreur envoi: {response.text}")
+            
+    except Exception as e:
+        logger.error(f"Erreur send_whatsapp: {str(e)}")
+
 # ---------- Lancement ----------
 if __name__ == '__main__':
     Config.validate()
