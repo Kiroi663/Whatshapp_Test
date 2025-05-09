@@ -54,7 +54,7 @@ CATEGORIES = [
 ]
 ROWS_PER_PAGE = 5
 
-# ---------- Utils ----------
+# ---------- Utilities ----------
 def normalize_number(num: str) -> str:
     n = num.lstrip('+')
     if not re.match(r'^\d{10,15}$', n):
@@ -92,7 +92,7 @@ user_states = {}
 def reset_state(user: str):
     user_states.pop(user, None)
 
-# ---------- Templates ----------
+# ---------- Message Templates ----------
 def text_message(text: str) -> dict:
     return {"type": "text", "text": {"body": text}}
 
@@ -136,7 +136,7 @@ def show_categories_page(user: str, page: int = 0):
         "interactive": {
             "type": "list",
             "body": {"text": "Choisissez une catégorie :"},
-            "action": {"button": "Voir catégories", "sections": [{"title": "Catégories", "rows": rows}]}  
+            "action": {"button": "Voir catégories", "sections": [{"title": "Catégories", "rows": rows}]}
         }
     }
     send_whatsapp(user, payload)
@@ -150,7 +150,7 @@ def show_favorites(user: str):
     else:
         for fav in favs:
             send_whatsapp(user, text_message(f"⭐ {fav.get('title')} - {fav.get('url')}"))
-    send_whatsapp(user, {"type": "text", "text": {"body": "🔙 Tapez /start pour revenir au menu."}})
+    send_whatsapp(user, text_message("Tapez /start pour revenir au menu."))
     reset_state(user)
 
 # ---------- Jobs Listing ----------
@@ -167,7 +167,6 @@ def send_jobs_page(user: str, category: str, page: int = 0):
         msg = f"📌 {job.get('title')}\n🏢 {job.get('company')}\n📍 {job.get('location')}\n🔗 {job.get('url')}"
         send_whatsapp(user, text_message(msg))
         time.sleep(0.3)
-    # navigation via buttons
     buttons = []
     if page > 0:
         buttons.append({"type": "reply", "reply": {"id": f"PAGE_{category}_{page-1}", "title": "◀️ Précédent"}})
@@ -205,24 +204,36 @@ def webhook_verify():
 @app.route('/webhook', methods=['POST'])
 def webhook_receive():
     try:
-        pkt = request.get_data()
-        if not verify_signature(pkt, request.headers.get('X-Hub-Signature-256', '')):
+        payload = request.get_data()
+        if not verify_signature(payload, request.headers.get('X-Hub-Signature-256', '')):
             return jsonify({"status": "invalid signature"}), 403
         data = request.json
-        for e in data.get('entry', []):
-            for c in e.get('changes', []):
-                for m in c.get('value', {}).get('messages', []):
-                    if m.get('type') == 'interactive':
-                        handle_interactive(normalize_number(m['from']), m['interactive'])
-                    else:
-                        # ignore any user text replies
-                        pass
+        for entry in data.get('entry', []):
+            for change in entry.get('changes', []):
+                for message in change.get('value', {}).get('messages', []):
+                    mtype = message.get('type')
+                    user = normalize_number(message['from'])
+                    if mtype == 'text':
+                        handle_text(user, message['text']['body'].strip())
+                    elif mtype == 'interactive':
+                        handle_interactive(user, message['interactive'])
         return jsonify({"status": "success"}), 200
     except Exception as e:
         logger.error(f"webhook error: {e}")
         return jsonify({"status": "error"}), 500
 
-# ---------- Main ----------
+# ---------- Text Handler ----------
+def handle_text(user: str, text: str):
+    cmd = text.upper()
+    state = user_states.get(user, {}).get('state')
+    logger.debug(f"TXT {cmd}|STATE {state}")
+    if cmd in ['/START', 'START']:
+        start_flow(user)
+    else:
+        # Any unrecognized text resets flow
+        start_flow(user)
+
+# ---------- Main Entrypoint ----------
 if __name__ == '__main__':
     Config.validate()
     jobs_col.update_many({'category': 'Rouder'}, {'$set': {'category': 'Remote'}})
