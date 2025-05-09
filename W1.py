@@ -103,8 +103,11 @@ def show_categories_page(user: str, page: int = 0):
     start = page * ROWS_PER_PAGE
     end = start + ROWS_PER_PAGE
     rows = []
+    # Build rows with truncated titles (max 24 chars)
     for i in range(start, min(end, len(CATEGORIES))):
-        rows.append({"id": f"CAT_{i}", "title": CATEGORIES[i], "description": ""})
+        raw = CATEGORIES[i]
+        title = raw if len(raw) <= 24 else raw[:21] + '...'
+        rows.append({"id": f"CAT_{i}", "title": title, "description": ""})
     if page > 0:
         rows.append({"id": f"CAT_PAGE_{page-1}", "title": "◀️ Précédent", "description": ""})
     if end < len(CATEGORIES):
