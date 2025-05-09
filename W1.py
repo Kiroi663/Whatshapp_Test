@@ -70,6 +70,20 @@ def verify_signature(payload: bytes, signature: str) -> bool:
 def create_message(to: str, content: dict) -> dict:
     return {"messaging_product":"whatsapp","recipient_type":"individual","to":to,**content}
 
+# ---------- Envoi WhatsApp ----------
+def send_whatsapp(to: str, content: dict):
+    try:
+        payload = create_message(to, content)
+        headers = {
+            "Authorization": f"Bearer {Config.WA_ACCESS_TOKEN}",
+            "Content-Type": "application/json"
+        }
+        response = requests.post(Config.BASE_URL, headers=headers, json=payload)
+        if response.status_code != 200:
+            logger.error(f"Erreur envoi: {response.text}")
+    except Exception as e:
+        logger.error(f"Erreur send_whatsapp: {str(e)}")
+
 # ---------- États utilisateur ----------
 user_states = {}
 def reset_state(user: str): user_states.pop(user,None)
@@ -78,22 +92,34 @@ def reset_state(user: str): user_states.pop(user,None)
 def text_message(text: str) -> dict:
     return {"type":"text","text":{"body":text}}
 
+def show_favorites(user: str):
+    # Exemple basique, à adapter
+    favs = list(favs_col.find({"user": user}))
+    if not favs:
+        send_whatsapp(user, text_message("Vous n'avez pas encore de favoris."))
+    else:
+        for fav in favs:
+            send_whatsapp(user, text_message(f"⭐ {fav.get('title')} - {fav.get('url')}"))
+    send_whatsapp(user, {"type":"interactive","interactive":{
+        "type":"button","body":{"text":"Que voulez-vous faire?"},"action":{"buttons":[
+            {"type":"reply","reply":{"id":"MAIN_MENU","title":"🔙 Menu"}}
+        ]}
+    }})
+    user_states[user] = {"state":"MAIN_MENU"}
+
 # ---------- CATÉGORIES COMME BOUTONS ----------
 def show_categories_page(user: str, page: int = 0):
     start = page * ROWS_PER_PAGE
     end = start + ROWS_PER_PAGE
     buttons = []
-    # 5 catégories en tant que boutons
     for i in range(start, min(end, len(CATEGORIES))):
         title = CATEGORIES[i]
         truncated = (title[:25] + '...') if len(title)>28 else title
         buttons.append({"type":"reply","reply":{"id":f"CAT_{i}","title":truncated}})
-    # Navigation
     if page>0:
         buttons.append({"type":"reply","reply":{"id":f"CAT_PAGE_{page-1}","title":"◀️ Précédent"}})
     if end < len(CATEGORIES):
         buttons.append({"type":"reply","reply":{"id":f"CAT_PAGE_{page+1}","title":"Suivant ▶️"}})
-    # Retour menu
     buttons.append({"type":"reply","reply":{"id":"MAIN_MENU","title":"🔙 Menu"}})
 
     send_whatsapp(user,{"type":"interactive","interactive":{
@@ -142,7 +168,8 @@ def process_message(msg: dict):
         t=msg.get('type')
         if t=='text': handle_text(user,msg['text']['body'].strip())
         elif t=='interactive': handle_interactive(user,msg['interactive'])
-    except Exception as e: logger.error(f"Process error: {e}")
+    except Exception as e:
+        logger.error(f"Process error: {e}")
 
 # ---------- TEXTE ----------
 def handle_text(user: str, txt: str):
@@ -191,4 +218,3 @@ if __name__=='__main__':
     Config.validate()
     jobs_col.update_many({'category':'Rouder'},{'$set':{'category':'Remote'}})
     serve(app,host='0.0.0.0',port=Config.PORT)
-
