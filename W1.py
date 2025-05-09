@@ -131,8 +131,30 @@ def start_flow(user: str):
     user_states[user] = {"state": "MAIN_MENU"}
 
 def show_categories(user: str):
-    rows = [{"id": f"CAT_{i}", "title": cat} for i, cat in enumerate(CATEGORIES)]
-    send_whatsapp(user, list_message("Choisissez une catégorie :", rows))
+    rows = []
+    for i, cat in enumerate(CATEGORIES):
+        # Tronquer à 24 caractères max avec élision
+        truncated = (cat[:21] + '...') if len(cat) > 24 else cat
+        rows.append({
+            "id": f"CAT_{i}",
+            "title": truncated,
+            "description": ""  # Champ requis mais vide
+        })
+    
+    send_whatsapp(user, {
+        "type": "interactive",
+        "interactive": {
+            "type": "list",
+            "body": {"text": "Choisissez une catégorie :"},
+            "action": {
+                "button": "Voir options",
+                "sections": [{
+                    "title": "Catégories d'emplois",
+                    "rows": rows
+                }]
+            }
+        }
+    })
     user_states[user] = {"state": "CATEGORY_SELECTION"}
 
 def send_jobs_page(user: str, category: str, page: int = 0):
