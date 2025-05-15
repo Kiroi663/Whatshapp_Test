@@ -59,11 +59,17 @@ def normalize_number(num: str) -> str:
     n = num.lstrip('+')
     if not re.match(r'^\d{10,15}$', n):
         raise ValueError("Invalid number format")
-    return f"+{n}"
+    formatted = f"+{n}"
+    logger.debug(f"Normalized number: {formatted}")
+    return formatted
+
 
 def verify_signature(payload: bytes, signature: str) -> bool:
     digest = hmac.new(Config.APP_SECRET, payload, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(f"sha256={digest}", signature)
+    valid = hmac.compare_digest(f"sha256={digest}", signature)
+    logger.debug(f"Signature valid: {valid}")
+    return valid
+
 
 def create_message(to: str, content: dict) -> dict:
     return {
@@ -73,6 +79,7 @@ def create_message(to: str, content: dict) -> dict:
         **content
     }
 
+
 def send_whatsapp(to: str, content: dict):
     try:
         payload = create_message(to, content)
@@ -81,10 +88,11 @@ def send_whatsapp(to: str, content: dict):
             "Content-Type": "application/json"
         }
         resp = requests.post(Config.BASE_URL, headers=headers, json=payload)
+        logger.debug(f"WhatsApp response {resp.status_code}: {resp.text}")
         if resp.status_code != 200:
-            logger.error(f"Error send: {resp.text}")
+            logger.error(f"Error sending message: {resp.status_code} {resp.text}")
     except Exception as e:
-        logger.error(f"send error: {e}")
+        logger.error(f"send_whatsapp exception: {e}")
 
 # ---------- State ----------
 user_states = {}
@@ -96,50 +104,23 @@ def reset_state(user: str):
 def text_message(text: str) -> dict:
     return {"type": "text", "text": {"body": text}}
 
-# ---------- Main Menu as List ----------
+# ---------- Main Menu as Simple Text (fallback) ----------
 def start_flow(user: str):
     reset_state(user)
-    rows = [
-        {"id": "BROWSE", "title": "Parcourir les offres", "description": ""},
-        {"id": "FAVORITES", "title": "Mes favoris", "description": ""}
-    ]
-    payload = {
-        "type": "interactive",
-        "interactive": {
-            "type": "list",
-            "body": {"text": "🌟 Bienvenue sur JobBot! Choisissez une action :"},
-            "action": {
-                "button": "Voir options",
-                "sections": [{"title": "Menu", "rows": rows}]
-            }
-        }
-    }
-    send_whatsapp(user, payload)
+    # Simple text fallback while awaiting template approval
+    welcome = (
+        "🌟 Bienvenue sur JobBot!"
+        "\nTapez /start pour réafficher ce menu."
+    )
+    send_whatsapp(user, text_message(welcome))
     user_states[user] = {"state": "MAIN_MENU"}
 
-# ---------- Category Listing ----------
+# ---------- Category Listing (text fallback) ----------
 def show_categories_page(user: str, page: int = 0):
-    start = page * ROWS_PER_PAGE
-    end = start + ROWS_PER_PAGE
-    rows = []
-    for i in range(start, min(end, len(CATEGORIES))):
-        raw = CATEGORIES[i]
-        title = raw if len(raw) <= 24 else raw[:21] + '...'
-        rows.append({"id": f"CAT_{i}", "title": title, "description": ""})
-    if page > 0:
-        rows.append({"id": f"CAT_PAGE_{page-1}", "title": "◀️ Précédent", "description": ""})
-    if end < len(CATEGORIES):
-        rows.append({"id": f"CAT_PAGE_{page+1}", "title": "Suivant ▶️", "description": ""})
-    rows.append({"id": "MAIN_MENU", "title": "🔙 Retour au menu", "description": ""})
-    payload = {
-        "type": "interactive",
-        "interactive": {
-            "type": "list",
-            "body": {"text": "Choisissez une catégorie :"},
-            "action": {"button": "Voir catégories", "sections": [{"title": "Catégories", "rows": rows}]}
-        }
-    }
-    send_whatsapp(user, payload)
+    reset_state(user)
+    rows = CATEGORIES
+    formatted = "\n".join(f"{i+1}. {cat}" for i, cat in enumerate(rows))
+    send_whatsapp(user, text_message(f"Choisissez une catégorie par numéro :\n{formatted}"))
     user_states[user] = {"state": "CATEGORY_SELECTION", "cat_page": page}
 
 # ---------- Show Favorites ----------
@@ -150,12 +131,13 @@ def show_favorites(user: str):
     else:
         for fav in favs:
             send_whatsapp(user, text_message(f"⭐ {fav.get('title')} - {fav.get('url')}"))
+            time.sleep(0.1)
     send_whatsapp(user, text_message("Tapez /start pour revenir au menu."))
     reset_state(user)
 
 # ---------- Jobs Listing ----------
-def send_jobs_page(user: str, category: str, page: int = 0):
-    cat_name = CATEGORIES[int(category)]
+def send_jobs_page(user: str, category_idx: int, page: int = 0):
+    cat_name = CATEGORIES[category_idx]
     query = {"category": cat_name}
     total = jobs_col.count_documents(query)
     per = ROWS_PER_PAGE
@@ -164,35 +146,22 @@ def send_jobs_page(user: str, category: str, page: int = 0):
         send_whatsapp(user, text_message("Aucune offre disponible."))
         return
     for job in jobs:
-        msg = f"📌 {job.get('title')}\n🏢 {job.get('company')}\n📍 {job.get('location')}\n🔗 {job.get('url')}"
+        msg = (
+            f"📌 {job.get('title')}\n"
+            f"🏢 {job.get('company')}\n"
+            f"📍 {job.get('location')}\n"
+            f"🔗 {job.get('url')}"
+        )
         send_whatsapp(user, text_message(msg))
-        time.sleep(0.3)
-    buttons = []
-    if page > 0:
-        buttons.append({"type": "reply", "reply": {"id": f"PAGE_{category}_{page-1}", "title": "◀️ Précédent"}})
-    if (page + 1) * per < total:
-        buttons.append({"type": "reply", "reply": {"id": f"PAGE_{category}_{page+1}", "title": "Suivant ▶️"}})
-    buttons.append({"type": "reply", "reply": {"id": "MAIN_MENU", "title": "🔙 Menu"}})
-    send_whatsapp(user, {"type": "interactive", "interactive": {"type": "button", "body": {"text": f"Page {page+1}"}, "action": {"buttons": buttons}}})
-    user_states[user] = {"state": "BROWSING", "category": category, "page": page}
+        time.sleep(0.2)
+    send_whatsapp(user, text_message(f"Page {page+1}/{(total-1)//per+1}. Tapez /start pour menu."))
+    user_states[user] = {"state": "BROWSING", "category": category_idx, "page": page}
 
 # ---------- Handlers ----------
 def handle_interactive(user: str, inter: dict):
-    itype = inter.get("type")
-    if itype == "list_reply":
-        sel = inter["list_reply"]["id"]
-        if sel == "BROWSE":
-            show_categories_page(user, 0)
-        elif sel == "FAVORITES":
-            show_favorites(user)
-        elif sel.startswith("CAT_PAGE_"):
-            page = int(sel.split("_")[2])
-            show_categories_page(user, page)
-        elif sel.startswith("CAT_"):
-            idx = int(sel.split("_")[1])
-            send_jobs_page(user, str(idx), 0)
-        elif sel == "MAIN_MENU":
-            start_flow(user)
+    # Interactive handler left as placeholder for future template use
+    send_whatsapp(user, text_message("Les messages interactifs ne sont pas encore disponibles."))
+    user_states[user] = {"state": "MAIN_MENU"}
 
 # ---------- Webhooks ----------
 @app.route('/webhook', methods=['GET'])
@@ -203,24 +172,26 @@ def webhook_verify():
 
 @app.route('/webhook', methods=['POST'])
 def webhook_receive():
-    try:
-        payload = request.get_data()
-        if not verify_signature(payload, request.headers.get('X-Hub-Signature-256', '')):
-            return jsonify({"status": "invalid signature"}), 403
-        data = request.json
-        for entry in data.get('entry', []):
-            for change in entry.get('changes', []):
-                for message in change.get('value', {}).get('messages', []):
-                    mtype = message.get('type')
+    raw = request.get_data()
+    logger.debug(f"Received POST /webhook, headers={dict(request.headers)} payload={raw}")
+    if not verify_signature(raw, request.headers.get('X-Hub-Signature-256', '')):
+        logger.warning("Invalid signature on incoming webhook")
+        return jsonify({"status": "invalid signature"}), 403
+    data = request.json
+    for entry in data.get('entry', []):
+        for change in entry.get('changes', []):
+            for message in change.get('value', {}).get('messages', []):
+                mtype = message.get('type')
+                try:
                     user = normalize_number(message['from'])
-                    if mtype == 'text':
-                        handle_text(user, message['text']['body'].strip())
-                    elif mtype == 'interactive':
-                        handle_interactive(user, message['interactive'])
-        return jsonify({"status": "success"}), 200
-    except Exception as e:
-        logger.error(f"webhook error: {e}")
-        return jsonify({"status": "error"}), 500
+                except ValueError as ve:
+                    logger.error(f"Invalid user number: {message.get('from')}")
+                    continue
+                if mtype == 'text':
+                    handle_text(user, message['text']['body'].strip())
+                elif mtype == 'interactive':
+                    handle_interactive(user, message['interactive'])
+    return jsonify({"status": "success"}), 200
 
 # ---------- Text Handler ----------
 def handle_text(user: str, text: str):
@@ -230,11 +201,12 @@ def handle_text(user: str, text: str):
     if cmd in ['/START', 'START']:
         start_flow(user)
     else:
-        # Any unrecognized text resets flow
+        # Fallback to main menu on any text
         start_flow(user)
 
 # ---------- Main Entrypoint ----------
 if __name__ == '__main__':
     Config.validate()
+    # Correct any miscategorized documents
     jobs_col.update_many({'category': 'Rouder'}, {'$set': {'category': 'Remote'}})
     serve(app, host='0.0.0.0', port=Config.PORT)
